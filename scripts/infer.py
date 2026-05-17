@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Any
 
 MODEL_NAME = "Qwen/Qwen3-4B-Base"
 
@@ -18,11 +16,16 @@ class InferConfig:
     do_sample: bool = True
 
 
-def build_tokenizer(model_name: str = MODEL_NAME) -> AutoTokenizer:
+def build_tokenizer(model_name: str = MODEL_NAME) -> Any:
+    from transformers import AutoTokenizer
+
     return AutoTokenizer.from_pretrained(model_name)
 
 
-def build_model(model_name: str = MODEL_NAME) -> AutoModelForCausalLM:
+def build_model(model_name: str = MODEL_NAME) -> Any:
+    import torch
+    from transformers import AutoModelForCausalLM
+
     return AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
@@ -32,10 +35,12 @@ def build_model(model_name: str = MODEL_NAME) -> AutoModelForCausalLM:
 
 def generate_text(
     prompt: str,
-    tokenizer: AutoTokenizer,
-    model: AutoModelForCausalLM,
+    tokenizer: Any,
+    model: Any,
     config: InferConfig | None = None,
 ) -> str:
+    import torch
+
     cfg = config or InferConfig()
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
