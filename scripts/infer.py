@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-MODEL_NAME = "Qwen/Qwen3-4B-Base"
+from scripts.weights import MODEL_DIR
+
+DEFAULT_MODEL_PATH = str(MODEL_DIR)
 
 
 @dataclass
@@ -16,20 +18,21 @@ class InferConfig:
     do_sample: bool = True
 
 
-def build_tokenizer(model_name: str = MODEL_NAME) -> Any:
+def build_tokenizer(model_path: str = DEFAULT_MODEL_PATH) -> Any:
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(model_name)
+    return AutoTokenizer.from_pretrained(model_path, local_files_only=True)
 
 
-def build_model(model_name: str = MODEL_NAME) -> Any:
+def build_model(model_path: str = DEFAULT_MODEL_PATH) -> Any:
     import torch
     from transformers import AutoModelForCausalLM
 
     return AutoModelForCausalLM.from_pretrained(
-        model_name,
+        model_path,
         torch_dtype=torch.bfloat16,
         device_map="auto",
+        local_files_only=True,
     )
 
 
