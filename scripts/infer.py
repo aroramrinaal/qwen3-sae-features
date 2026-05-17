@@ -55,4 +55,16 @@ def generate_text(
         )
 
     generated_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+
+def format_inference_output(prompt: str, completion: str) -> str:
+    prompt_block = prompt.strip() or "<empty prompt>"
+    completion_block = completion.strip() or "<empty completion>"
+    return (
+        "\n"
+        "================ Qwen3 Inference ================\n"
+        f"Prompt:\n{prompt_block}\n\n"
+        f"Completion:\n{completion_block}\n"
+        "=================================================="
+    )

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import modal
 
-from scripts.infer import InferConfig, build_model, build_tokenizer, generate_text
+from scripts.infer import (
+    InferConfig,
+    build_model,
+    build_tokenizer,
+    format_inference_output,
+    generate_text,
+)
 
 app = modal.App("qwen3-sae-features")
 
@@ -30,4 +36,5 @@ def run_inference(prompt: str, max_new_tokens: int = 128) -> str:
 
 @app.local_entrypoint()
 def main(prompt: str = "The capital of France is"):
-    print(run_inference.remote(prompt=prompt))
+    completion = run_inference.remote(prompt=prompt)
+    print(format_inference_output(prompt=prompt, completion=completion))
