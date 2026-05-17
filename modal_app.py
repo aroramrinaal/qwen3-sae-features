@@ -10,8 +10,8 @@ app = modal.App("qwen3-sae-features")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .add_local_python_source("scripts")
     .pip_install("torch", "transformers", "accelerate", "safetensors")
+    .add_local_python_source("scripts")
 )
 
 
