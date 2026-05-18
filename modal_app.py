@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import modal
 
+from scripts.activations import capture_activation_metadata
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -29,9 +33,25 @@ image = (
 )
 
 
+def _gpu_request_from_command() -> str | None:
+    if gpu := os.getenv("MODAL_GPU"):
+        return gpu
+
+    for idx, arg in enumerate(sys.argv):
+        if arg == "--gpu" and idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+        if arg.startswith("--gpu="):
+            return arg.split("=", 1)[1]
+
+    return None
+
+
+GPU_REQUEST = _gpu_request_from_command()
+
+
 @app.function(
     image=image,
-    gpu="H100",
+    gpu=GPU_REQUEST,
     volumes={str(VOLUME_ROOT): volume},
     timeout=60 * 20,
 )
@@ -41,6 +61,17 @@ def run_inference(prompt: str, max_new_tokens: int = 128) -> str:
     model = build_model()
     config = InferConfig(max_new_tokens=max_new_tokens)
     return generate_text(prompt=prompt, tokenizer=tokenizer, model=model, config=config)
+
+
+@app.function(
+    image=image,
+    gpu=GPU_REQUEST,
+    volumes={str(VOLUME_ROOT): volume},
+    timeout=60 * 20,
+)
+def capture_layer_activations(prompt: str = "The capital of France is") -> dict:
+    volume.reload()
+    return capture_activation_metadata(prompt=prompt)
 
 
 @app.function(
@@ -58,9 +89,19 @@ def save_model_weights_to_volume() -> dict:
 
 
 @app.local_entrypoint()
-def main(prompt: str = "The capital of France is"):
+def main(gpu: str, prompt: str = "The capital of France is"):
     completion = run_inference.remote(prompt=prompt)
     print(format_inference_output(prompt=prompt, completion=completion))
+
+
+@app.local_entrypoint()
+def smoke_test_activations(gpu: str, prompt: str = "The capital of France is"):
+    result = capture_layer_activations.remote(prompt=prompt)
+    print(f"layer: {result['layer']}")
+    print(f"shape: {result['shape']}")
+    print(f"dtype: {result['dtype']}")
+    print(f"device: {result['device']}")
+    print(f"token_count: {result['token_count']}")
 
 
 @app.local_entrypoint()
