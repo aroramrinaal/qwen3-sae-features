@@ -30,7 +30,7 @@ def build_model(model_path: str = DEFAULT_MODEL_PATH) -> Any:
 
     return AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
         local_files_only=True,
     )
