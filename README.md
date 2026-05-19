@@ -1,20 +1,101 @@
 # qwen3-sae-features
 
-`scripts/infer.py` contains modular inference logic for `Qwen/Qwen3-4B-Base` using Hugging Face Transformers and `model.generate()`. It loads model files from the Modal Volume path `/vol/models/Qwen3-4B-Base`.
+Qwen3 SAE feature-learning experiments on Modal using SAELens.
 
-`scripts/weights.py` contains the model snapshot download and cleanup logic. Running the save command clears the model subfolder in the `qwen3-sae-features` Modal Volume, then writes the safetensors shards plus the tokenizer/config files needed by Transformers.
+## Phase 0: Model setup and inference
 
-The `Qwen3-4B-Base` model weights are stored in the Modal Volume named `qwen3-sae-features`, under the `models/Qwen3-4B-Base` subfolder. That folder contains the `.safetensors` weight shards plus the necessary Transformers config and tokenizer files for local-volume inference.
+Completed.
 
-`modal_app.py` is the single Modal app entry point for both inference and weight saving.
+- Downloaded `Qwen/Qwen3-4B-Base` into the Modal Volume `qwen3-sae-features`.
+- Stored model files under `/vol/models/Qwen3-4B-Base`.
+- Verified Hugging Face Transformers inference with `model.generate()`.
+- Verified the model loads from local Modal Volume files instead of redownloading from Hugging Face.
 
+## Phase 1: Residual-stream hook smoke test
 
-step-by-step breakdown:
+Completed.
 
-phase 0: environment setup and model verification
-- loading weights and running inference on modal.com's cloud infrastructure
-- saving Qwen/Qwen3-4B-Base model weights to a Modal Volume at this location; volume name: "qwen3-sae-features" , under the `models/Qwen3-4B-Base` subfolder. That folder contains the `.safetensors` weight shards plus the necessary Transformers config and tokenizer files for local-volume inference.
+- Hooked `model.layers.20`.
+- Captured layer-20 activations from Qwen3-4B-Base.
+- Verified activation shape `[batch, seq, d_model]`.
+- Confirmed layer-20 residual stream width is `2560`.
 
-phase 1: 
-- smoke test by hooking one residual stream layer, let's say layer 20 since this qwent model has toal of 36 layers. Capturing activations from model.model.layers[20]
-- For Qwen-style huggingFace models, the layer output hidden states are usually the residual stream after that block.
+Smoke result:
+
+```text
+layer: 20
+shape: torch.Size([1, 5, 2560])
+dtype: torch.bfloat16
+device: cuda:0
+token_count: 5
+```
+
+## Phase 2: Dataset tokenization
+
+Completed for smoke.
+
+- Used FineWeb-Edu text as the source distribution.
+- Tokenized text using the Qwen3 tokenizer.
+- Saved the tokenized dataset to the Modal Volume as a Hugging Face Arrow dataset.
+
+Smoke tokenized dataset path:
+
+```text
+/vol/datasets/fineweb-edu/tokens/smoke
+```
+
+## Phase 3: Cached activation collection
+
+Completed for smoke.
+
+- Used SAELens `CacheActivationsRunner`.
+- Loaded Qwen3-4B-Base from the Modal Volume.
+- Ran a forward pass over the smoke token dataset.
+- Cached activations from `model.layers.20`.
+- Saved cached activations as a Hugging Face Arrow dataset.
+
+Smoke activation cache path:
+
+```text
+/vol/activations/qwen3-4b-base/layer20/smoke
+```
+
+Inspection result:
+
+```text
+columns: ['model.layers.20', 'token_ids']
+row_count: 16
+context_size: 512
+d_in: 2560
+total_activation_tokens: 8192
+dtype: float32
+no_nan: true
+no_inf: true
+all_checks_passed: true
+```
+
+## Phase 4: Smoke SAE training
+
+Current phase.
+
+The next step is to train a tiny standard SAE using the cached smoke activation dataset. This is not intended to produce scientifically meaningful features. It is only meant to prove that the cached activations can be loaded by SAELens and used for SAE training.
+
+Smoke SAE config:
+
+```text
+config/train_sae_smoke.yaml
+```
+
+Expected smoke SAE output:
+
+```text
+/vol/saes/qwen3-4b-base/layer20/smoke_standard_exp2
+```
+
+The trainer saves:
+
+```text
+final_sae/
+inference_sae/
+metadata.json
+```

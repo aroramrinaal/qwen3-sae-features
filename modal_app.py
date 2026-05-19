@@ -13,6 +13,7 @@ import modal
 from scripts.activations import capture_activation_metadata
 from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.inspect_activations import inspect_cached_activations
+from scripts.inspect_sae import inspect_sae
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -21,6 +22,7 @@ from scripts.infer import (
     generate_text,
 )
 from scripts.prepare_dataset import run_prepare
+from scripts.train_sae import run_train
 from scripts.weights import MODEL_DIR, VOLUME_NAME, VOLUME_ROOT, save_model_snapshot
 
 app = modal.App("qwen3-sae-features")
@@ -205,6 +207,33 @@ def inspect_cached_activations_on_volume(config_path: str) -> dict:
     return inspect_cached_activations(config_path)
 
 
+@app.function(
+    image=image,
+    gpu=GPU_REQUEST,
+    cpu=8,
+    memory=65536,
+    timeout=60 * 60 * 3,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def train_sae_on_volume(config_path: str) -> dict:
+    volume.reload()
+    result = run_train(config_path)
+    volume.commit()
+    return result
+
+
+@app.function(
+    image=image,
+    cpu=2,
+    memory=8192,
+    timeout=60 * 10,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def inspect_sae_on_volume(config_path: str) -> dict:
+    volume.reload()
+    return inspect_sae(config_path)
+
+
 @app.local_entrypoint()
 def main(gpu: str, prompt: str = "The capital of France is"):
     completion = run_inference.remote(prompt=prompt)
@@ -273,4 +302,22 @@ def inspect_smoke_activations():
     result = inspect_cached_activations_on_volume.remote(
         "/root/config/inspect_smoke_activations.yaml"
     )
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def train_smoke_sae(gpu: str = "H100"):
+    call = train_sae_on_volume.spawn("/root/config/train_sae_smoke.yaml")
+    print(f"Spawned smoke SAE training: {call.object_id}")
+
+
+@app.local_entrypoint()
+def train_smoke_sae_debug(gpu: str = "H100"):
+    result = train_sae_on_volume.remote("/root/config/train_sae_smoke.yaml")
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def inspect_smoke_sae():
+    result = inspect_sae_on_volume.remote("/root/config/inspect_sae_smoke.yaml")
     pprint.pp(result)
