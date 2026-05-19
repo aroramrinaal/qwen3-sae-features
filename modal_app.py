@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pprint
 import shutil
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ import modal
 
 from scripts.activations import capture_activation_metadata
 from scripts.collect_activations import get_cache_output_path, run_collect
+from scripts.inspect_activations import inspect_cached_activations
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -191,6 +193,18 @@ def delete_activation_cache_path(cache_path: str) -> dict:
     }
 
 
+@app.function(
+    image=image,
+    cpu=2,
+    memory=8192,
+    timeout=60 * 10,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def inspect_cached_activations_on_volume(config_path: str) -> dict:
+    volume.reload()
+    return inspect_cached_activations(config_path)
+
+
 @app.local_entrypoint()
 def main(gpu: str, prompt: str = "The capital of France is"):
     completion = run_inference.remote(prompt=prompt)
@@ -252,3 +266,11 @@ def run_cache_activations(config: str = "/root/config/cache_1m.yaml", gpu: str =
 def clear_activation_cache(path: str):
     result = delete_activation_cache_path.remote(path)
     print(result)
+
+
+@app.local_entrypoint()
+def inspect_smoke_activations():
+    result = inspect_cached_activations_on_volume.remote(
+        "/root/config/inspect_smoke_activations.yaml"
+    )
+    pprint.pp(result)
