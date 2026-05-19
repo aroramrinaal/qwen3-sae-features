@@ -54,8 +54,11 @@ def build_cache_config(cfg_dict: dict[str, Any]):
 
 
 def run_collect(config_path: str | Path):
+    from datasets import load_from_disk
     from sae_lens import CacheActivationsRunner
 
     cfg_dict = load_config(config_path)
+    dataset_path = cfg_dict["dataset_path"]
+    tokenized_dataset = load_from_disk(dataset_path)
     cfg = build_cache_config(cfg_dict)
-    return CacheActivationsRunner(cfg).run()
+    return CacheActivationsRunner(cfg, override_dataset=tokenized_dataset).run()
