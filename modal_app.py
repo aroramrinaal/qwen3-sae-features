@@ -13,7 +13,7 @@ import modal
 from scripts.activations import capture_activation_metadata
 from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.inspect_activations import inspect_cached_activations
-from scripts.inspect_sae import inspect_sae
+from scripts.inspect_sae import inspect_sae as inspect_sae_artifact
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -243,7 +243,7 @@ def train_sae_on_volume(config_path: str) -> dict:
 )
 def inspect_sae_on_volume(config_path: str) -> dict:
     volume.reload()
-    return inspect_sae(config_path)
+    return inspect_sae_artifact(config_path)
 
 
 @app.local_entrypoint()
