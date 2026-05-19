@@ -1,31 +1,41 @@
-"""Modal remote entrypoint for Qwen3 inference on an NVIDIA H100."""
+"""Config-driven Modal entrypoint for Qwen3 SAE experiments.
+
+Run examples:
+
+    modal run --detach modal_app.py --config config/tokenize_1m.yaml
+    modal run --detach modal_app.py --config config/cache_1m.yaml
+    modal run modal_app.py --config config/inspect_1m_activations.yaml --wait
+
+Set the GPU for GPU-backed jobs with MODAL_GPU, for example:
+
+    MODAL_GPU=H100 modal run --detach modal_app.py --config config/train_sae_1m.yaml
+"""
 
 from __future__ import annotations
 
+import argparse
 import os
 import pprint
 import shutil
-import sys
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import modal
 
-from scripts.activations import capture_activation_metadata
 from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.inspect_activations import inspect_cached_activations
 from scripts.inspect_sae import inspect_sae as inspect_sae_artifact
-from scripts.infer import (
-    InferConfig,
-    build_model,
-    build_tokenizer,
-    format_inference_output,
-    generate_text,
-)
 from scripts.prepare_dataset import run_prepare
 from scripts.train_sae import run_train
-from scripts.weights import MODEL_DIR, VOLUME_NAME, VOLUME_ROOT, save_model_snapshot
+from scripts.weights import VOLUME_NAME, VOLUME_ROOT
 
-app = modal.App("qwen3-sae-features")
+APP_NAME = "qwen3-sae-features"
+REMOTE_CONFIG_ROOT = Path("/root/config")
+DEFAULT_GPU = "H100"
+GPU_REQUEST = os.getenv("MODAL_GPU", DEFAULT_GPU)
+
+app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 image = (
@@ -40,93 +50,117 @@ image = (
         "sae-lens",
         "pyyaml",
     )
-    .add_local_dir("config", remote_path="/root/config")
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .add_local_dir("config", remote_path=str(REMOTE_CONFIG_ROOT))
     .add_local_dir("scripts", remote_path="/root/scripts")
 )
 
 
-def _gpu_request_from_command() -> str | None:
-    if gpu := os.getenv("MODAL_GPU"):
-        return gpu
-
-    for idx, arg in enumerate(sys.argv):
-        if arg == "--gpu" and idx + 1 < len(sys.argv):
-            return sys.argv[idx + 1]
-        if arg.startswith("--gpu="):
-            return arg.split("=", 1)[1]
-
-    return None
+class JobKind(StrEnum):
+    TOKENIZE = "tokenize"
+    CACHE_ACTIVATIONS = "cache_activations"
+    INSPECT_ACTIVATIONS = "inspect_activations"
+    TRAIN_SAE = "train_sae"
+    INSPECT_SAE = "inspect_sae"
 
 
-GPU_REQUEST = _gpu_request_from_command()
+def _load_local_config(config_path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        return _load_top_level_yaml_keys(config_path)
+
+    with config_path.open() as file:
+        config = yaml.safe_load(file)
+    if not isinstance(config, dict):
+        raise ValueError(f"Expected a YAML mapping in {config_path}")
+    return config
 
 
-def _remote_config_path(config_path: str) -> str:
-    path = Path(config_path)
+def _load_top_level_yaml_keys(config_path: Path) -> dict[str, Any]:
+    """Read enough YAML locally to choose the Modal function.
+
+    The full config is parsed remotely with PyYAML. Keeping this local fallback
+    small avoids requiring PyYAML in the client venv just to dispatch a job.
+    """
+
+    config: dict[str, Any] = {}
+    for line in config_path.read_text().splitlines():
+        if not line or line.startswith((" ", "\t", "#")) or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.split("#", 1)[0].strip()
+        config[key] = value.strip("'\"") if value else None
+
+    if not config:
+        raise ValueError(f"Expected a YAML mapping in {config_path}")
+    return config
+
+
+def _resolve_local_config_path(config: str) -> Path:
+    config_path = Path(config)
+    if config_path.is_absolute():
+        return config_path
+
+    local_path = Path.cwd() / config_path
+    if local_path.exists() or (config_path.parts and config_path.parts[0] == "config"):
+        return local_path
+
+    return Path.cwd() / "config" / config_path
+
+
+def _remote_config_path(config: str) -> str:
+    path = Path(config)
     if path.is_absolute():
         return str(path)
 
-    parts = path.parts
-    if parts and parts[0] == "config":
+    if path.parts and path.parts[0] == "config":
         return str(Path("/root") / path)
 
-    return str(Path("/root/config") / path)
+    return str(REMOTE_CONFIG_ROOT / path)
 
 
-@app.function(
-    image=image,
-    gpu=GPU_REQUEST,
-    volumes={str(VOLUME_ROOT): volume},
-    timeout=60 * 20,
-)
-def run_inference(prompt: str, max_new_tokens: int = 128) -> str:
-    volume.reload()
-    tokenizer = build_tokenizer()
-    model = build_model()
-    config = InferConfig(max_new_tokens=max_new_tokens)
-    return generate_text(prompt=prompt, tokenizer=tokenizer, model=model, config=config)
+def _infer_job_kind(config: dict[str, Any]) -> JobKind:
+    if kind := config.get("job"):
+        try:
+            return JobKind(str(kind))
+        except ValueError as exc:
+            allowed = ", ".join(job.value for job in JobKind)
+            raise ValueError(f"Unknown job={kind!r}. Expected one of: {allowed}") from exc
+
+    if "tokenizer_name" in config and "save_path" in config:
+        return JobKind.TOKENIZE
+    if "new_cached_activations_path" in config:
+        return JobKind.CACHE_ACTIVATIONS
+    if "activation_path" in config:
+        return JobKind.INSPECT_ACTIVATIONS
+    if "sae_output_path" in config:
+        return JobKind.TRAIN_SAE
+    if "sae_path" in config or "load_path" in config:
+        return JobKind.INSPECT_SAE
+
+    raise ValueError(
+        "Could not infer Modal job kind from config. Add a 'job' field with one "
+        f"of: {', '.join(job.value for job in JobKind)}"
+    )
 
 
-@app.function(
-    image=image,
-    gpu=GPU_REQUEST,
-    volumes={str(VOLUME_ROOT): volume},
-    timeout=60 * 20,
-)
-def capture_layer_activations(prompt: str = "The capital of France is") -> dict:
-    volume.reload()
-    return capture_activation_metadata(prompt=prompt)
+def _run_or_spawn(function: modal.Function, config_path: str, wait: bool) -> Any:
+    if wait:
+        return function.remote(config_path)
+
+    call = function.spawn(config_path)
+    return {"spawned": True, "function_call_id": call.object_id}
 
 
-@app.function(
-    image=image,
-    gpu=GPU_REQUEST,
-    volumes={str(VOLUME_ROOT): volume},
-    timeout=60 * 20,
-)
-def inspect_qwen_module_names(limit: int = 40, hook_name: str = "model.layers.20") -> dict:
-    volume.reload()
-    model = build_model()
-    module_names = [name for name, _module in model.named_modules()]
-    return {
-        "requested_hook": hook_name,
-        "hook_exists": hook_name in module_names,
-        "first_module_names": module_names[:limit],
-    }
-
-
-@app.function(
-    image=image,
-    cpu=8,
-    memory=32768,
-    timeout=60 * 60,
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    volumes={str(VOLUME_ROOT): volume},
-)
-def save_model_weights_to_volume() -> dict:
-    result = save_model_snapshot(MODEL_DIR)
-    volume.commit()
-    return result
+def _print_result(result: Any) -> None:
+    if isinstance(result, dict):
+        pprint.pp(result)
+    else:
+        print(result)
 
 
 @app.function(
@@ -137,7 +171,7 @@ def save_model_weights_to_volume() -> dict:
     secrets=[modal.Secret.from_name("huggingface-secret")],
     volumes={str(VOLUME_ROOT): volume},
 )
-def prepare_dataset_on_volume(config_path: str) -> dict:
+def prepare_dataset_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
     dataset = run_prepare(config_path)
     volume.commit()
@@ -157,13 +191,14 @@ def prepare_dataset_on_volume(config_path: str) -> dict:
     secrets=[modal.Secret.from_name("huggingface-secret")],
     volumes={str(VOLUME_ROOT): volume},
 )
-def cache_activations_on_volume(config_path: str) -> dict:
+def cache_activations_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
     output_path = get_cache_output_path(config_path)
+    activations_root = VOLUME_ROOT / "activations"
     if not output_path.is_absolute():
         raise ValueError("new_cached_activations_path must be an absolute /vol path.")
-    if not output_path.is_relative_to(VOLUME_ROOT / "activations"):
-        raise ValueError(f"Refusing to overwrite outside {VOLUME_ROOT / 'activations'}.")
+    if not output_path.is_relative_to(activations_root):
+        raise ValueError(f"Refusing to overwrite outside {activations_root}.")
 
     if output_path.exists():
         shutil.rmtree(output_path)
@@ -181,40 +216,12 @@ def cache_activations_on_volume(config_path: str) -> dict:
 
 @app.function(
     image=image,
-    cpu=1,
-    memory=1024,
-    timeout=60 * 5,
-    volumes={str(VOLUME_ROOT): volume},
-)
-def delete_activation_cache_path(cache_path: str) -> dict:
-    volume.reload()
-    target_path = Path(cache_path)
-    activations_root = VOLUME_ROOT / "activations"
-
-    if not target_path.is_absolute():
-        raise ValueError("cache_path must be an absolute /vol path.")
-    if not target_path.is_relative_to(activations_root):
-        raise ValueError(f"Refusing to delete outside {activations_root}.")
-
-    existed = target_path.exists()
-    if existed:
-        shutil.rmtree(target_path)
-        volume.commit()
-
-    return {
-        "deleted": existed,
-        "path": str(target_path),
-    }
-
-
-@app.function(
-    image=image,
     cpu=2,
     memory=8192,
     timeout=60 * 10,
     volumes={str(VOLUME_ROOT): volume},
 )
-def inspect_cached_activations_on_volume(config_path: str) -> dict:
+def inspect_cached_activations_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
     return inspect_cached_activations(config_path)
 
@@ -227,7 +234,7 @@ def inspect_cached_activations_on_volume(config_path: str) -> dict:
     timeout=60 * 60 * 3,
     volumes={str(VOLUME_ROOT): volume},
 )
-def train_sae_on_volume(config_path: str) -> dict:
+def train_sae_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
     result = run_train(config_path)
     volume.commit()
@@ -241,133 +248,56 @@ def train_sae_on_volume(config_path: str) -> dict:
     timeout=60 * 10,
     volumes={str(VOLUME_ROOT): volume},
 )
-def inspect_sae_on_volume(config_path: str) -> dict:
+def inspect_sae_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
     return inspect_sae_artifact(config_path)
 
 
-@app.local_entrypoint()
-def main(gpu: str, prompt: str = "The capital of France is"):
-    completion = run_inference.remote(prompt=prompt)
-    print(format_inference_output(prompt=prompt, completion=completion))
+def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
+    local_path = _resolve_local_config_path(config)
+    local_config = _load_local_config(local_path)
+    job_kind = _infer_job_kind(local_config)
+    remote_path = _remote_config_path(config)
+
+    if job_kind == JobKind.TOKENIZE:
+        result = _run_or_spawn(prepare_dataset_on_volume, remote_path, wait)
+    elif job_kind == JobKind.CACHE_ACTIVATIONS:
+        result = _run_or_spawn(cache_activations_on_volume, remote_path, wait)
+    elif job_kind == JobKind.INSPECT_ACTIVATIONS:
+        result = inspect_cached_activations_on_volume.remote(remote_path)
+    elif job_kind == JobKind.TRAIN_SAE:
+        result = _run_or_spawn(train_sae_on_volume, remote_path, wait)
+    elif job_kind == JobKind.INSPECT_SAE:
+        result = inspect_sae_on_volume.remote(remote_path)
+    else:
+        raise AssertionError(f"Unhandled job kind: {job_kind}")
+
+    return {
+        "app": APP_NAME,
+        "job": job_kind.value,
+        "local_config_path": str(local_path),
+        "remote_config_path": remote_path,
+        "gpu": GPU_REQUEST if job_kind in {JobKind.CACHE_ACTIVATIONS, JobKind.TRAIN_SAE} else None,
+        "result": result,
+    }
 
 
 @app.local_entrypoint()
-def smoke_test_activations(gpu: str, prompt: str = "The capital of France is"):
-    result = capture_layer_activations.remote(prompt=prompt)
-    print(f"layer: {result['layer']}")
-    print(f"shape: {result['shape']}")
-    print(f"dtype: {result['dtype']}")
-    print(f"device: {result['device']}")
-    print(f"token_count: {result['token_count']}")
-
-
-@app.local_entrypoint()
-def inspect_modules(gpu: str = "H100", limit: int = 40, hook_name: str = "model.layers.20"):
-    result = inspect_qwen_module_names.remote(limit=limit, hook_name=hook_name)
-    print(f"requested_hook: {result['requested_hook']}")
-    print(f"hook_exists: {result['hook_exists']}")
-    print("first_module_names:")
-    for module_name in result["first_module_names"]:
-        print(module_name)
-
-
-@app.local_entrypoint()
-def save_weights():
-    result = save_model_weights_to_volume.remote()
-    print("Saved model files to Modal Volume")
-    print(result)
-
-
-@app.local_entrypoint()
-def smoke_tokenize():
-    call = prepare_dataset_on_volume.spawn(_remote_config_path("smoke_tokenize.yaml"))
-    print(f"Spawned smoke tokenization: {call.object_id}")
-
-
-@app.local_entrypoint()
-def smoke_cache_activations(gpu: str = "H100"):
-    call = cache_activations_on_volume.spawn(_remote_config_path("smoke_cache.yaml"))
-    print(f"Spawned smoke activation caching: {call.object_id}")
-
-
-@app.local_entrypoint()
-def run_tokenize(config: str = "config/tokenize_1m.yaml"):
-    call = prepare_dataset_on_volume.spawn(_remote_config_path(config))
-    print(f"Spawned tokenization: {call.object_id}")
-
-
-@app.local_entrypoint()
-def run_cache_activations(config: str = "config/cache_1m.yaml", gpu: str = "H100"):
-    call = cache_activations_on_volume.spawn(_remote_config_path(config))
-    print(f"Spawned activation caching: {call.object_id}")
-
-
-@app.local_entrypoint()
-def clear_activation_cache(path: str):
-    result = delete_activation_cache_path.remote(path)
-    print(result)
-
-
-@app.local_entrypoint()
-def inspect_smoke_activations():
-    result = inspect_cached_activations_on_volume.remote(
-        _remote_config_path("inspect_smoke_activations.yaml")
+def main(*argv: str) -> None:
+    parser = argparse.ArgumentParser(
+        description="Run a qwen3-sae-features Modal job from a YAML config."
     )
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
-def inspect_activations(config: str = "config/inspect_smoke_activations.yaml"):
-    result = inspect_cached_activations_on_volume.remote(_remote_config_path(config))
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
-def inspect_1m_activations():
-    result = inspect_cached_activations_on_volume.remote(
-        _remote_config_path("inspect_1m_activations.yaml")
+    parser.add_argument("config_arg", nargs="?", help="YAML config path, e.g. config/cache_1m.yaml")
+    parser.add_argument("--config", dest="config_opt", help="YAML config path")
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Block for tokenization/cache/training results instead of spawning a background call.",
     )
-    pprint.pp(result)
+    args = parser.parse_args(list(argv))
 
+    config = args.config_opt or args.config_arg
+    if config is None:
+        parser.error("provide a config path, either as a positional argument or with --config")
 
-@app.local_entrypoint()
-def train_smoke_sae(gpu: str = "H100"):
-    call = train_sae_on_volume.spawn(_remote_config_path("train_sae_smoke.yaml"))
-    print(f"Spawned smoke SAE training: {call.object_id}")
-
-
-@app.local_entrypoint()
-def train_sae(config: str = "config/train_sae_smoke.yaml", gpu: str = "H100"):
-    call = train_sae_on_volume.spawn(_remote_config_path(config))
-    print(f"Spawned SAE training: {call.object_id}")
-
-
-@app.local_entrypoint()
-def train_sae_debug(config: str = "config/train_sae_smoke.yaml", gpu: str = "H100"):
-    result = train_sae_on_volume.remote(_remote_config_path(config))
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
-def train_1m_sae(gpu: str = "H100"):
-    call = train_sae_on_volume.spawn(_remote_config_path("train_sae_1m.yaml"))
-    print(f"Spawned 1M SAE training: {call.object_id}")
-
-
-@app.local_entrypoint()
-def train_smoke_sae_debug(gpu: str = "H100"):
-    result = train_sae_on_volume.remote(_remote_config_path("train_sae_smoke.yaml"))
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
-def inspect_smoke_sae():
-    result = inspect_sae_on_volume.remote(_remote_config_path("inspect_sae_smoke.yaml"))
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
-def inspect_1m_sae():
-    result = inspect_sae_on_volume.remote(_remote_config_path("inspect_sae_1m.yaml"))
-    pprint.pp(result)
+    _print_result(_dispatch_config(config=config, wait=args.wait))

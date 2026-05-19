@@ -122,4 +122,14 @@ config/train_sae_1m.yaml
 config/inspect_sae_1m.yaml
 ```
 
-Friendly Modal entrypoints are config-driven. Long jobs use `.spawn()` so they can run detached; inspections use `.remote()` so they print results directly.
+Modal runs are config-driven through a single entrypoint:
+
+```bash
+.venv/bin/modal run --detach modal_app.py config/tokenize_1m.yaml
+.venv/bin/modal run --detach modal_app.py config/cache_1m.yaml
+.venv/bin/modal run --detach modal_app.py config/train_sae_1m.yaml
+.venv/bin/modal run modal_app.py config/inspect_1m_activations.yaml
+.venv/bin/modal run modal_app.py config/inspect_sae_1m.yaml
+```
+
+The launcher infers the job from the YAML keys. Tokenization, activation caching, and training are spawned by default for detached/background execution; pass `--wait` if you want those jobs to block and print their full result. Inspect configs always run synchronously so their checks print directly.
