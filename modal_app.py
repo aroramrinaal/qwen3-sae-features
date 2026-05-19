@@ -8,6 +8,7 @@ import sys
 import modal
 
 from scripts.activations import capture_activation_metadata
+from scripts.collect_activations import run_collect
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -15,6 +16,7 @@ from scripts.infer import (
     format_inference_output,
     generate_text,
 )
+from scripts.prepare_dataset import run_prepare
 from scripts.weights import MODEL_DIR, VOLUME_NAME, VOLUME_ROOT, save_model_snapshot
 
 app = modal.App("qwen3-sae-features")
@@ -28,7 +30,11 @@ image = (
         "accelerate",
         "safetensors",
         "huggingface_hub[hf_transfer]",
+        "datasets",
+        "sae-lens",
+        "pyyaml",
     )
+    .add_local_dir("config", remote_path="/root/config")
     .add_local_dir("scripts", remote_path="/root/scripts")
 )
 
@@ -76,6 +82,23 @@ def capture_layer_activations(prompt: str = "The capital of France is") -> dict:
 
 @app.function(
     image=image,
+    gpu=GPU_REQUEST,
+    volumes={str(VOLUME_ROOT): volume},
+    timeout=60 * 20,
+)
+def inspect_qwen_module_names(limit: int = 40, hook_name: str = "model.layers.20") -> dict:
+    volume.reload()
+    model = build_model()
+    module_names = [name for name, _module in model.named_modules()]
+    return {
+        "requested_hook": hook_name,
+        "hook_exists": hook_name in module_names,
+        "first_module_names": module_names[:limit],
+    }
+
+
+@app.function(
+    image=image,
     cpu=8,
     memory=32768,
     timeout=60 * 60,
@@ -86,6 +109,45 @@ def save_model_weights_to_volume() -> dict:
     result = save_model_snapshot(MODEL_DIR)
     volume.commit()
     return result
+
+
+@app.function(
+    image=image,
+    cpu=8,
+    memory=32768,
+    timeout=60 * 60,
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    volumes={str(VOLUME_ROOT): volume},
+)
+def prepare_dataset_on_volume(config_path: str) -> dict:
+    volume.reload()
+    dataset = run_prepare(config_path)
+    volume.commit()
+    return {
+        "config_path": config_path,
+        "num_rows": getattr(dataset, "num_rows", None),
+        "columns": list(getattr(dataset, "column_names", []) or []),
+    }
+
+
+@app.function(
+    image=image,
+    gpu=GPU_REQUEST,
+    cpu=8,
+    memory=65536,
+    timeout=60 * 60 * 6,
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    volumes={str(VOLUME_ROOT): volume},
+)
+def cache_activations_on_volume(config_path: str) -> dict:
+    volume.reload()
+    dataset = run_collect(config_path)
+    volume.commit()
+    return {
+        "config_path": config_path,
+        "num_rows": getattr(dataset, "num_rows", None),
+        "columns": list(getattr(dataset, "column_names", []) or []),
+    }
 
 
 @app.local_entrypoint()
@@ -105,7 +167,41 @@ def smoke_test_activations(gpu: str, prompt: str = "The capital of France is"):
 
 
 @app.local_entrypoint()
+def inspect_modules(gpu: str = "H100", limit: int = 40, hook_name: str = "model.layers.20"):
+    result = inspect_qwen_module_names.remote(limit=limit, hook_name=hook_name)
+    print(f"requested_hook: {result['requested_hook']}")
+    print(f"hook_exists: {result['hook_exists']}")
+    print("first_module_names:")
+    for module_name in result["first_module_names"]:
+        print(module_name)
+
+
+@app.local_entrypoint()
 def save_weights():
     result = save_model_weights_to_volume.remote()
     print("Saved model files to Modal Volume")
+    print(result)
+
+
+@app.local_entrypoint()
+def smoke_tokenize():
+    result = prepare_dataset_on_volume.remote("/root/config/smoke_tokenize.yaml")
+    print(result)
+
+
+@app.local_entrypoint()
+def smoke_cache_activations(gpu: str = "H100"):
+    result = cache_activations_on_volume.remote("/root/config/smoke_cache.yaml")
+    print(result)
+
+
+@app.local_entrypoint()
+def run_tokenize(config: str = "/root/config/tokenize_1m.yaml"):
+    result = prepare_dataset_on_volume.remote(config)
+    print(result)
+
+
+@app.local_entrypoint()
+def run_cache_activations(config: str = "/root/config/cache_1m.yaml", gpu: str = "H100"):
+    result = cache_activations_on_volume.remote(config)
     print(result)
