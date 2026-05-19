@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+from pathlib import Path
 
 import modal
 
 from scripts.activations import capture_activation_metadata
-from scripts.collect_activations import run_collect
+from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.infer import (
     InferConfig,
     build_model,
@@ -141,12 +143,51 @@ def prepare_dataset_on_volume(config_path: str) -> dict:
 )
 def cache_activations_on_volume(config_path: str) -> dict:
     volume.reload()
+    output_path = get_cache_output_path(config_path)
+    if not output_path.is_absolute():
+        raise ValueError("new_cached_activations_path must be an absolute /vol path.")
+    if not output_path.is_relative_to(VOLUME_ROOT / "activations"):
+        raise ValueError(f"Refusing to overwrite outside {VOLUME_ROOT / 'activations'}.")
+
+    if output_path.exists():
+        shutil.rmtree(output_path)
+        volume.commit()
+
     dataset = run_collect(config_path)
     volume.commit()
     return {
         "config_path": config_path,
+        "cached_activations_path": str(output_path),
         "num_rows": getattr(dataset, "num_rows", None),
         "columns": list(getattr(dataset, "column_names", []) or []),
+    }
+
+
+@app.function(
+    image=image,
+    cpu=1,
+    memory=1024,
+    timeout=60 * 5,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def delete_activation_cache_path(cache_path: str) -> dict:
+    volume.reload()
+    target_path = Path(cache_path)
+    activations_root = VOLUME_ROOT / "activations"
+
+    if not target_path.is_absolute():
+        raise ValueError("cache_path must be an absolute /vol path.")
+    if not target_path.is_relative_to(activations_root):
+        raise ValueError(f"Refusing to delete outside {activations_root}.")
+
+    existed = target_path.exists()
+    if existed:
+        shutil.rmtree(target_path)
+        volume.commit()
+
+    return {
+        "deleted": existed,
+        "path": str(target_path),
     }
 
 
@@ -185,23 +226,29 @@ def save_weights():
 
 @app.local_entrypoint()
 def smoke_tokenize():
-    result = prepare_dataset_on_volume.remote("/root/config/smoke_tokenize.yaml")
-    print(result)
+    call = prepare_dataset_on_volume.spawn("/root/config/smoke_tokenize.yaml")
+    print(f"Spawned smoke tokenization: {call.object_id}")
 
 
 @app.local_entrypoint()
 def smoke_cache_activations(gpu: str = "H100"):
-    result = cache_activations_on_volume.remote("/root/config/smoke_cache.yaml")
-    print(result)
+    call = cache_activations_on_volume.spawn("/root/config/smoke_cache.yaml")
+    print(f"Spawned smoke activation caching: {call.object_id}")
 
 
 @app.local_entrypoint()
 def run_tokenize(config: str = "/root/config/tokenize_1m.yaml"):
-    result = prepare_dataset_on_volume.remote(config)
-    print(result)
+    call = prepare_dataset_on_volume.spawn(config)
+    print(f"Spawned tokenization: {call.object_id}")
 
 
 @app.local_entrypoint()
 def run_cache_activations(config: str = "/root/config/cache_1m.yaml", gpu: str = "H100"):
-    result = cache_activations_on_volume.remote(config)
+    call = cache_activations_on_volume.spawn(config)
+    print(f"Spawned activation caching: {call.object_id}")
+
+
+@app.local_entrypoint()
+def clear_activation_cache(path: str):
+    result = delete_activation_cache_path.remote(path)
     print(result)

@@ -50,7 +50,21 @@ def _normalize_cache_config(cfg_dict: dict[str, Any]) -> dict[str, Any]:
 def build_cache_config(cfg_dict: dict[str, Any]):
     from sae_lens import CacheActivationsRunnerConfig
 
-    return CacheActivationsRunnerConfig(**_normalize_cache_config(cfg_dict))
+    cfg = CacheActivationsRunnerConfig(**_normalize_cache_config(cfg_dict))
+    if cfg.n_tokens_in_buffer <= 0:
+        raise ValueError(
+            "CacheActivationsRunnerConfig produced n_tokens_in_buffer=0. "
+            "Increase buffer_size_gb or reduce context_size/d_in."
+        )
+    return cfg
+
+
+def get_cache_output_path(config_path: str | Path) -> Path:
+    cfg_dict = load_config(config_path)
+    output_path = cfg_dict.get("new_cached_activations_path")
+    if output_path is None:
+        raise ValueError(f"{config_path} must set new_cached_activations_path")
+    return Path(output_path)
 
 
 def run_collect(config_path: str | Path):

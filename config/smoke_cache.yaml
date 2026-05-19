@@ -8,10 +8,10 @@ is_dataset_tokenized: true
 context_size: 512
 training_tokens: 8192
 new_cached_activations_path: /vol/activations/qwen3-4b-base/layer20/smoke
-dtype: bfloat16
+dtype: float32
 device: cuda
 model_batch_size: 8
-buffer_size_gb: 0.04
+buffer_size_gb: 0.1
 streaming: false
 prepend_bos: false
 model_from_pretrained_kwargs:
