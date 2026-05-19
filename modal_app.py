@@ -61,6 +61,18 @@ def _gpu_request_from_command() -> str | None:
 GPU_REQUEST = _gpu_request_from_command()
 
 
+def _remote_config_path(config_path: str) -> str:
+    path = Path(config_path)
+    if path.is_absolute():
+        return str(path)
+
+    parts = path.parts
+    if parts and parts[0] == "config":
+        return str(Path("/root") / path)
+
+    return str(Path("/root/config") / path)
+
+
 @app.function(
     image=image,
     gpu=GPU_REQUEST,
@@ -269,25 +281,25 @@ def save_weights():
 
 @app.local_entrypoint()
 def smoke_tokenize():
-    call = prepare_dataset_on_volume.spawn("/root/config/smoke_tokenize.yaml")
+    call = prepare_dataset_on_volume.spawn(_remote_config_path("smoke_tokenize.yaml"))
     print(f"Spawned smoke tokenization: {call.object_id}")
 
 
 @app.local_entrypoint()
 def smoke_cache_activations(gpu: str = "H100"):
-    call = cache_activations_on_volume.spawn("/root/config/smoke_cache.yaml")
+    call = cache_activations_on_volume.spawn(_remote_config_path("smoke_cache.yaml"))
     print(f"Spawned smoke activation caching: {call.object_id}")
 
 
 @app.local_entrypoint()
-def run_tokenize(config: str = "/root/config/tokenize_1m.yaml"):
-    call = prepare_dataset_on_volume.spawn(config)
+def run_tokenize(config: str = "config/tokenize_1m.yaml"):
+    call = prepare_dataset_on_volume.spawn(_remote_config_path(config))
     print(f"Spawned tokenization: {call.object_id}")
 
 
 @app.local_entrypoint()
-def run_cache_activations(config: str = "/root/config/cache_1m.yaml", gpu: str = "H100"):
-    call = cache_activations_on_volume.spawn(config)
+def run_cache_activations(config: str = "config/cache_1m.yaml", gpu: str = "H100"):
+    call = cache_activations_on_volume.spawn(_remote_config_path(config))
     print(f"Spawned activation caching: {call.object_id}")
 
 
@@ -300,24 +312,68 @@ def clear_activation_cache(path: str):
 @app.local_entrypoint()
 def inspect_smoke_activations():
     result = inspect_cached_activations_on_volume.remote(
-        "/root/config/inspect_smoke_activations.yaml"
+        _remote_config_path("inspect_smoke_activations.yaml")
+    )
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def inspect_activations(config: str = "config/inspect_smoke_activations.yaml"):
+    result = inspect_cached_activations_on_volume.remote(_remote_config_path(config))
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def inspect_1m_activations():
+    result = inspect_cached_activations_on_volume.remote(
+        _remote_config_path("inspect_1m_activations.yaml")
     )
     pprint.pp(result)
 
 
 @app.local_entrypoint()
 def train_smoke_sae(gpu: str = "H100"):
-    call = train_sae_on_volume.spawn("/root/config/train_sae_smoke.yaml")
+    call = train_sae_on_volume.spawn(_remote_config_path("train_sae_smoke.yaml"))
     print(f"Spawned smoke SAE training: {call.object_id}")
 
 
 @app.local_entrypoint()
+def train_sae(config: str = "config/train_sae_smoke.yaml", gpu: str = "H100"):
+    call = train_sae_on_volume.spawn(_remote_config_path(config))
+    print(f"Spawned SAE training: {call.object_id}")
+
+
+@app.local_entrypoint()
+def train_sae_debug(config: str = "config/train_sae_smoke.yaml", gpu: str = "H100"):
+    result = train_sae_on_volume.remote(_remote_config_path(config))
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def train_1m_sae(gpu: str = "H100"):
+    call = train_sae_on_volume.spawn(_remote_config_path("train_sae_1m.yaml"))
+    print(f"Spawned 1M SAE training: {call.object_id}")
+
+
+@app.local_entrypoint()
 def train_smoke_sae_debug(gpu: str = "H100"):
-    result = train_sae_on_volume.remote("/root/config/train_sae_smoke.yaml")
+    result = train_sae_on_volume.remote(_remote_config_path("train_sae_smoke.yaml"))
     pprint.pp(result)
 
 
 @app.local_entrypoint()
 def inspect_smoke_sae():
-    result = inspect_sae_on_volume.remote("/root/config/inspect_sae_smoke.yaml")
+    result = inspect_sae_on_volume.remote(_remote_config_path("inspect_sae_smoke.yaml"))
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def inspect_sae(config: str = "config/inspect_sae_smoke.yaml"):
+    result = inspect_sae_on_volume.remote(_remote_config_path(config))
+    pprint.pp(result)
+
+
+@app.local_entrypoint()
+def inspect_1m_sae():
+    result = inspect_sae_on_volume.remote(_remote_config_path("inspect_sae_1m.yaml"))
     pprint.pp(result)

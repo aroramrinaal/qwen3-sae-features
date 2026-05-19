@@ -1,0 +1,7 @@
+activation_path: /vol/activations/qwen3-4b-base/layer20/1m
+hook_name: model.layers.20
+expected_rows: 2048
+expected_context_size: 512
+expected_d_in: 2560
+expected_dtype: float32
+sample_rows: 2

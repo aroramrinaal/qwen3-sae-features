@@ -99,3 +99,27 @@ final_sae/
 inference_sae/
 metadata.json
 ```
+
+## Phase 5: 1M-token run
+
+Planned next.
+
+The 1M run repeats the smoke pipeline with larger token and activation caches:
+
+```text
+tokenized dataset: /vol/datasets/fineweb-edu/tokens/1m
+activation cache:  /vol/activations/qwen3-4b-base/layer20/1m
+SAE output:        /vol/saes/qwen3-4b-base/layer20/1m_standard_exp2
+```
+
+Configs:
+
+```text
+config/tokenize_1m.yaml
+config/cache_1m.yaml
+config/inspect_1m_activations.yaml
+config/train_sae_1m.yaml
+config/inspect_sae_1m.yaml
+```
+
+Friendly Modal entrypoints are config-driven. Long jobs use `.spawn()` so they can run detached; inspections use `.remote()` so they print results directly.
