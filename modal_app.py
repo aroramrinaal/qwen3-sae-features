@@ -368,12 +368,6 @@ def inspect_smoke_sae():
 
 
 @app.local_entrypoint()
-def inspect_sae(config: str = "config/inspect_sae_smoke.yaml"):
-    result = inspect_sae_on_volume.remote(_remote_config_path(config))
-    pprint.pp(result)
-
-
-@app.local_entrypoint()
 def inspect_1m_sae():
     result = inspect_sae_on_volume.remote(_remote_config_path("inspect_sae_1m.yaml"))
     pprint.pp(result)
