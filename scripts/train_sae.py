@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -58,11 +59,7 @@ def build_training_cfg(cfg: dict[str, Any]):
         l1_warm_up_steps=int(cfg.get("l1_warm_up_steps", 0)),
     )
 
-    logger_cfg = LoggingConfig(
-        log_to_wandb=bool(cfg.get("log_to_wandb", False)),
-        wandb_log_frequency=int(cfg.get("wandb_log_frequency", 1)),
-        eval_every_n_wandb_logs=int(cfg.get("eval_every_n_wandb_logs", 0)),
-    )
+    logger_cfg = build_logging_cfg(LoggingConfig, cfg)
 
     return LanguageModelSAERunnerConfig(
         sae=sae_cfg,
@@ -100,6 +97,34 @@ def build_training_cfg(cfg: dict[str, Any]):
     )
 
 
+def build_logging_cfg(logging_config_class: type, cfg: dict[str, Any]):
+    logging_keys = {
+        "log_to_wandb": bool(cfg.get("log_to_wandb", False)),
+        "log_activations_store_to_wandb": bool(
+            cfg.get("log_activations_store_to_wandb", False)
+        ),
+        "log_optimizer_state_to_wandb": bool(
+            cfg.get("log_optimizer_state_to_wandb", False)
+        ),
+        "log_weights_to_wandb": bool(cfg.get("log_weights_to_wandb", True)),
+        "wandb_project": cfg.get("wandb_project"),
+        "wandb_entity": cfg.get("wandb_entity"),
+        "wandb_id": cfg.get("wandb_id"),
+        "run_name": cfg.get("run_name"),
+        "wandb_log_frequency": int(cfg.get("wandb_log_frequency", 10)),
+        "eval_every_n_wandb_logs": int(cfg.get("eval_every_n_wandb_logs", 100)),
+    }
+    provided = {
+        key: value for key, value in logging_keys.items() if value is not None
+    }
+
+    if is_dataclass(logging_config_class):
+        supported = {field.name for field in fields(logging_config_class)}
+        provided = {key: value for key, value in provided.items() if key in supported}
+
+    return logging_config_class(**provided)
+
+
 def save_training_metadata(cfg: dict[str, Any], output_dir: Path, result: Any) -> dict[str, Any]:
     metadata = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -115,6 +140,11 @@ def save_training_metadata(cfg: dict[str, Any], output_dir: Path, result: Any) -
         "dataset_path": cfg["dataset_path"],
         "training_tokens": int(cfg["training_tokens"]),
         "train_batch_size_tokens": int(cfg["train_batch_size_tokens"]),
+        "log_to_wandb": bool(cfg.get("log_to_wandb", False)),
+        "wandb_project": cfg.get("wandb_project"),
+        "run_name": cfg.get("run_name"),
+        "wandb_log_frequency": cfg.get("wandb_log_frequency"),
+        "eval_every_n_wandb_logs": cfg.get("eval_every_n_wandb_logs"),
         "dtype": cfg.get("dtype", "float32"),
         "device": cfg.get("device", "cuda"),
         "final_sae_path": str(output_dir / "final_sae"),

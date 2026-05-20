@@ -35,11 +35,15 @@ act_store_device: cpu
 seed: 42
 prepend_bos: false
 streaming: false
-n_eval_batches: 0
+n_eval_batches: 2
 
-log_to_wandb: false
-wandb_log_frequency: 100
-eval_every_n_wandb_logs: 1
+log_to_wandb: true
+log_weights_to_wandb: true
+log_optimizer_state_to_wandb: false
+wandb_project: qwen3-sae-features
+run_name: qwen3-4b-layer20-50m-exp4-l1-2
+wandb_log_frequency: 50
+eval_every_n_wandb_logs: 20
 
 n_checkpoints: 0
 checkpoint_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_2/checkpoints

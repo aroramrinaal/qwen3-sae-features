@@ -49,8 +49,9 @@ image = (
         "datasets",
         "sae-lens",
         "pyyaml",
+        "wandb",
     )
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({"HF_XET_HIGH_PERFORMANCE": "1"})
     .add_local_dir("config", remote_path=str(REMOTE_CONFIG_ROOT))
     .add_local_dir("scripts", remote_path="/root/scripts")
 )
@@ -231,7 +232,11 @@ def inspect_cached_activations_on_volume(config_path: str) -> dict[str, Any]:
     gpu=GPU_REQUEST,
     cpu=8,
     memory=65536,
-    timeout=60 * 60 * 3,
+    timeout=60 * 60 * 12,
+    secrets=[
+        modal.Secret.from_name("huggingface-secret"),
+        modal.Secret.from_name("wandb-secret"),
+    ],
     volumes={str(VOLUME_ROOT): volume},
 )
 def train_sae_on_volume(config_path: str) -> dict[str, Any]:
