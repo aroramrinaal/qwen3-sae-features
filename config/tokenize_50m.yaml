@@ -1,0 +1,13 @@
+tokenizer_name: /vol/models/Qwen3-4B-Base
+dataset_path: HuggingFaceFW/fineweb-edu
+dataset_name: sample-10BT
+split: train[:250000]
+context_size: 512
+num_proc: 8
+shuffle: true
+seed: 42
+prepend_bos: true
+begin_batch_token: bos
+begin_sequence_token: null
+sequence_separator_token: eos
+save_path: /vol/datasets/fineweb-edu/tokens/50m

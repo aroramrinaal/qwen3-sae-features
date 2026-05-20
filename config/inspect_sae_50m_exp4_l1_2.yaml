@@ -1,0 +1,8 @@
+sae_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_2
+load_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_2/final_sae
+metadata_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_2/metadata.json
+expected_d_in: 2560
+expected_d_sae: 10240
+expected_architecture: standard
+expected_hook_name: model.layers.20
+expected_cached_activations_path: /vol/activations/qwen3-4b-base/layer20/50m
