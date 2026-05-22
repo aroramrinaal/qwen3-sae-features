@@ -52,7 +52,14 @@ image = (
         "pyyaml",
         "wandb",
     )
-    .env({"HF_XET_HIGH_PERFORMANCE": "1"})
+    .env(
+        {
+            "HF_XET_HIGH_PERFORMANCE": "1",
+            # Keep remote Modal client heartbeat retry warnings out of long
+            # dashboard logs. Function failures still surface as exceptions.
+            "MODAL_LOGLEVEL": "ERROR",
+        }
+    )
     .add_local_dir("config", remote_path=str(REMOTE_CONFIG_ROOT))
     .add_local_dir("scripts", remote_path="/root/scripts")
 )

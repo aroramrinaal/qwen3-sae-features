@@ -149,7 +149,7 @@ def load_activation_dataset(config: DashboardConfig):
         )
     if "token_ids" not in dataset.column_names:
         raise ValueError("Feature dashboarding needs token_ids in the cached activation dataset.")
-    return dataset
+    return dataset.with_format("torch", columns=[config.hook_name, "token_ids"])
 
 
 def load_sae(config: DashboardConfig):
@@ -196,7 +196,7 @@ def stream_top_k_feature_activations(
 
     with torch.inference_mode():
         for batch in dataset.iter(batch_size=config.batch_rows):
-            batch_acts = torch.tensor(batch[config.hook_name], dtype=torch.float32)
+            batch_acts = activation_batch_to_tensor(batch[config.hook_name])
             if batch_acts.ndim != 3:
                 raise ValueError(
                     "Expected cached activations shaped [batch, context, d_in], "
@@ -243,6 +243,14 @@ def stream_top_k_feature_activations(
         tokens_seen=tokens_seen,
         context_size=context_size,
     )
+
+
+def activation_batch_to_tensor(batch_acts: Any):
+    import torch
+
+    if isinstance(batch_acts, torch.Tensor):
+        return batch_acts.to(dtype=torch.float32)
+    return torch.tensor(batch_acts, dtype=torch.float32)
 
 
 def apply_position_filters(
