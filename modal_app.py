@@ -310,7 +310,11 @@ def feature_dashboard_on_volume(config_path: str) -> dict[str, Any]:
 )
 def autointerp_labels_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
-    result = run_autointerp_labels(config_path, commit_callback=volume.commit)
+    result = run_autointerp_labels(
+        config_path,
+        commit_callback=volume.commit,
+        async_commit_callback=volume.commit.aio,
+    )
     volume.commit()
     return result
 

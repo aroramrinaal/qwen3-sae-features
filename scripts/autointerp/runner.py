@@ -6,7 +6,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from scripts.autointerp.config import (
     AutointerpConfig,
@@ -31,6 +31,7 @@ async def run_batches_async(
     rows: list[dict],
     config: AutointerpConfig,
     commit_callback: Callable[[], None] | None,
+    async_commit_callback: Callable[[], Awaitable[None]] | None,
 ) -> list[BatchResult]:
     import httpx
 
@@ -64,10 +65,10 @@ async def run_batches_async(
                     async with completed_lock:
                         completed_since_commit += 1
                         if (
-                            commit_callback is not None
+                            (commit_callback is not None or async_commit_callback is not None)
                             and completed_since_commit >= config.commit_every_batches
                         ):
-                            commit_callback()
+                            await commit_volume(commit_callback, async_commit_callback)
                             completed_since_commit = 0
                     print(
                         f"[autointerp] wrote batch={batch_id} features={feature_ids[0]}..{feature_ids[-1]}",
@@ -91,14 +92,24 @@ async def run_batches_async(
         tasks = [run_one(batch_id, batch_rows) for batch_id, batch_rows in enumerate(batches)]
         results = await asyncio.gather(*tasks)
 
-    if commit_callback is not None:
-        commit_callback()
+    await commit_volume(commit_callback, async_commit_callback)
     return results
+
+
+async def commit_volume(
+    commit_callback: Callable[[], None] | None,
+    async_commit_callback: Callable[[], Awaitable[None]] | None,
+) -> None:
+    if async_commit_callback is not None:
+        await async_commit_callback()
+    elif commit_callback is not None:
+        commit_callback()
 
 
 def run_autointerp_labels(
     config_path: str | Path,
     commit_callback: Callable[[], None] | None = None,
+    async_commit_callback: Callable[[], Awaitable[None]] | None = None,
 ) -> dict:
     start_time = time.time()
     config = parse_autointerp_config(config_path)
@@ -111,7 +122,14 @@ def run_autointerp_labels(
         flush=True,
     )
 
-    results = asyncio.run(run_batches_async(rows, config, commit_callback))
+    results = asyncio.run(
+        run_batches_async(
+            rows=rows,
+            config=config,
+            commit_callback=commit_callback,
+            async_commit_callback=async_commit_callback,
+        )
+    )
     failed_path = write_failed_batches(config, results)
     labels = merge_batch_files(config)
     labels_path = write_labels_jsonl(config, labels)
@@ -123,7 +141,9 @@ def run_autointerp_labels(
         results=results,
         elapsed_seconds=time.time() - start_time,
     )
-    if commit_callback is not None:
+    if async_commit_callback is not None:
+        asyncio.run(async_commit_callback())
+    elif commit_callback is not None:
         commit_callback()
 
     failed_count = sum(1 for result in results if not result.ok)
