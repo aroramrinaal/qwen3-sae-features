@@ -174,37 +174,3 @@ What the smoke config proves:
 
 Only after this looks clean should an `autointerp.py` step read
 `top_activations.jsonl` and ask an LLM for labels.
-
-## Phase 6: 1M-token run
-
-Planned next.
-
-The 1M run repeats the smoke pipeline with larger token and activation caches:
-
-```text
-tokenized dataset: /vol/datasets/fineweb-edu/tokens/1m
-activation cache:  /vol/activations/qwen3-4b-base/layer20/1m
-SAE output:        /vol/saes/qwen3-4b-base/layer20/1m_standard_exp2
-```
-
-Configs:
-
-```text
-config/tokenize_1m.yaml
-config/cache_1m.yaml
-config/inspect_1m_activations.yaml
-config/train_sae_1m.yaml
-config/inspect_sae_1m.yaml
-```
-
-Modal runs are config-driven through a single entrypoint:
-
-```bash
-.venv/bin/modal run --detach modal_app.py config/tokenize_1m.yaml
-.venv/bin/modal run --detach modal_app.py config/cache_1m.yaml
-.venv/bin/modal run --detach modal_app.py config/train_sae_1m.yaml
-.venv/bin/modal run modal_app.py config/inspect_1m_activations.yaml
-.venv/bin/modal run modal_app.py config/inspect_sae_1m.yaml
-```
-
-The launcher infers the job from the YAML keys. Tokenization, activation caching, and training are spawned by default for detached/background execution; pass `--wait` if you want those jobs to block and print their full result. Inspect configs always run synchronously so their checks print directly.
