@@ -24,6 +24,7 @@ from typing import Any
 import modal
 
 from scripts.collect_activations import get_cache_output_path, run_collect
+from scripts.feature_dashboard import run_feature_dashboard
 from scripts.inspect_activations import inspect_cached_activations
 from scripts.inspect_sae import inspect_sae as inspect_sae_artifact
 from scripts.prepare_dataset import run_prepare
@@ -63,6 +64,7 @@ class JobKind(StrEnum):
     INSPECT_ACTIVATIONS = "inspect_activations"
     TRAIN_SAE = "train_sae"
     INSPECT_SAE = "inspect_sae"
+    FEATURE_DASHBOARD = "feature_dashboard"
 
 
 def _load_local_config(config_path: Path) -> dict[str, Any]:
@@ -140,6 +142,8 @@ def _infer_job_kind(config: dict[str, Any]) -> JobKind:
         return JobKind.INSPECT_ACTIVATIONS
     if "sae_output_path" in config:
         return JobKind.TRAIN_SAE
+    if "output_path" in config and "activation_path" in config and "sae_path" in config:
+        return JobKind.FEATURE_DASHBOARD
     if "sae_path" in config or "load_path" in config:
         return JobKind.INSPECT_SAE
 
@@ -258,6 +262,21 @@ def inspect_sae_on_volume(config_path: str) -> dict[str, Any]:
     return inspect_sae_artifact(config_path)
 
 
+@app.function(
+    image=image,
+    gpu=GPU_REQUEST,
+    cpu=8,
+    memory=65536,
+    timeout=60 * 60 * 8,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def feature_dashboard_on_volume(config_path: str) -> dict[str, Any]:
+    volume.reload()
+    result = run_feature_dashboard(config_path)
+    volume.commit()
+    return result
+
+
 def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
     local_path = _resolve_local_config_path(config)
     local_config = _load_local_config(local_path)
@@ -274,6 +293,8 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         result = _run_or_spawn(train_sae_on_volume, remote_path, wait)
     elif job_kind == JobKind.INSPECT_SAE:
         result = inspect_sae_on_volume.remote(remote_path)
+    elif job_kind == JobKind.FEATURE_DASHBOARD:
+        result = _run_or_spawn(feature_dashboard_on_volume, remote_path, wait)
     else:
         raise AssertionError(f"Unhandled job kind: {job_kind}")
 
@@ -282,7 +303,10 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         "job": job_kind.value,
         "local_config_path": str(local_path),
         "remote_config_path": remote_path,
-        "gpu": GPU_REQUEST if job_kind in {JobKind.CACHE_ACTIVATIONS, JobKind.TRAIN_SAE} else None,
+        "gpu": GPU_REQUEST
+        if job_kind
+        in {JobKind.CACHE_ACTIVATIONS, JobKind.TRAIN_SAE, JobKind.FEATURE_DASHBOARD}
+        else None,
         "result": result,
     }
 

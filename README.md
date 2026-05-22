@@ -76,7 +76,7 @@ all_checks_passed: true
 
 ## Phase 4: Smoke SAE training
 
-Current phase.
+Completed for the 50M `exp4_l1_5` run.
 
 The next step is to train a tiny standard SAE using the cached smoke activation dataset. This is not intended to produce scientifically meaningful features. It is only meant to prove that the cached activations can be loaded by SAELens and used for SAE training.
 
@@ -100,7 +100,82 @@ inference_sae/
 metadata.json
 ```
 
-## Phase 5: 1M-token run
+## Phase 5: Feature dashboarding before autointerp
+
+Current phase.
+
+Do not start with LLM labels first. The LLM can only label the evidence you give
+it, so the first interpretability milestone is: can we produce clean top
+activating examples for SAE features?
+
+Mental model:
+
+```text
+cached layer-20 residual vector, shape [2560]
+        -> SAE encoder
+sparse feature activations, shape [10240]
+        -> stream top-k only
+decoded token windows with the max token bracketed
+```
+
+The base Qwen model does not need to run again for this step. We use:
+
+```text
+tokenizer:    /vol/models/Qwen3-4B-Base
+activations:  /vol/activations/qwen3-4b-base/layer20/50m
+SAE:          /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/final_sae
+```
+
+Feature dashboard outputs:
+
+```text
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/top_activations.jsonl
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/feature_summary.json
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/preview.md
+```
+
+Each `top_activations.jsonl` row is one feature:
+
+```json
+{
+  "feature_id": 3172,
+  "max_activation": 18.2,
+  "top_examples": [
+    {
+      "rank": 1,
+      "activation": 18.2,
+      "row_index": 123,
+      "token_position": 45,
+      "text": "... import torch.nn as [[nn]] ..."
+    }
+  ]
+}
+```
+
+Smoke dashboard run:
+
+```bash
+.venv/bin/modal run --detach modal_app.py --config config/feature_dashboard_smoke_50m_exp4_l1_5.yaml
+```
+
+Full dashboard run:
+
+```bash
+MODAL_GPU=H100 .venv/bin/modal run --detach modal_app.py --config config/feature_dashboard_50m_exp4_l1_5.yaml
+```
+
+What the smoke config proves:
+
+- the trained SAE loads from `final_sae`
+- cached `.arrow` activations load with the expected hook column
+- activations can be encoded into SAE feature activations
+- top activating token positions can be found without saving all `50M x 10240` activations
+- token windows can be decoded from the local Qwen tokenizer
+
+Only after this looks clean should an `autointerp.py` step read
+`top_activations.jsonl` and ask an LLM for labels.
+
+## Phase 6: 1M-token run
 
 Planned next.
 

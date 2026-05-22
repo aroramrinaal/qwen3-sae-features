@@ -1,0 +1,22 @@
+job: feature_dashboard
+
+model_name: /vol/models/Qwen3-4B-Base
+activation_path: /vol/activations/qwen3-4b-base/layer20/50m
+sae_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5
+load_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/final_sae
+hook_name: model.layers.20
+
+output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/dashboard
+overwrite: true
+
+# Full dashboard pass: scan all cached activation rows and write top examples
+# for every SAE feature. Raise batch_rows if the GPU has lots of free memory.
+top_k: 20
+window_tokens: 32
+preview_features: 40
+batch_rows: 2
+
+device: cuda
+dtype: float32
+local_files_only: true
+trust_remote_code: true
