@@ -83,7 +83,7 @@ The next step is to train a tiny standard SAE using the cached smoke activation 
 Smoke SAE config:
 
 ```text
-config/train_sae_smoke.yaml
+config/train/sae/smoke.yaml
 ```
 
 Expected smoke SAE output:
@@ -155,13 +155,13 @@ Each `top_activations.jsonl` row is one feature:
 Smoke dashboard run:
 
 ```bash
-.venv/bin/modal run --detach modal_app.py --config config/feature_dashboard_smoke_50m_exp4_l1_5.yaml
+.venv/bin/modal run --detach modal_app.py --config config/feature_dashboard/smoke_50m_exp4_l1_5.yaml
 ```
 
 Full dashboard run:
 
 ```bash
-MODAL_GPU=H100 .venv/bin/modal run --detach modal_app.py --config config/feature_dashboard_50m_exp4_l1_5.yaml
+MODAL_GPU=H100 .venv/bin/modal run --detach modal_app.py --config config/feature_dashboard/50m_exp4_l1_5.yaml
 ```
 
 What the smoke config proves:

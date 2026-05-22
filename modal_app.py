@@ -2,13 +2,13 @@
 
 Run examples:
 
-    modal run --detach modal_app.py --config config/tokenize_1m.yaml
-    modal run --detach modal_app.py --config config/cache_1m.yaml
-    modal run modal_app.py --config config/inspect_1m_activations.yaml --wait
+    modal run --detach modal_app.py --config config/tokenize/1m.yaml
+    modal run --detach modal_app.py --config config/cache/1m.yaml
+    modal run modal_app.py --config config/inspect/activations/1m.yaml --wait
 
 Set the GPU for GPU-backed jobs with MODAL_GPU, for example:
 
-    MODAL_GPU=H100 modal run --detach modal_app.py --config config/train_sae_1m.yaml
+    MODAL_GPU=H100 modal run --detach modal_app.py --config config/train/sae/1m.yaml
 """
 
 from __future__ import annotations
@@ -109,10 +109,21 @@ def _resolve_local_config_path(config: str) -> Path:
         return config_path
 
     local_path = Path.cwd() / config_path
-    if local_path.exists() or (config_path.parts and config_path.parts[0] == "config"):
+    if local_path.exists():
         return local_path
 
-    return Path.cwd() / "config" / config_path
+    config_root_path = Path.cwd() / "config" / config_path
+    if config_root_path.exists() or (config_path.parts and config_path.parts[0] == "config"):
+        return config_root_path
+
+    matches = sorted((Path.cwd() / "config").rglob(config_path.name))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        match_list = ", ".join(str(match.relative_to(Path.cwd())) for match in matches)
+        raise ValueError(f"Config filename {config_path.name!r} is ambiguous. Use one of: {match_list}")
+
+    return config_root_path
 
 
 def _remote_config_path(config: str) -> str:
@@ -281,7 +292,11 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
     local_path = _resolve_local_config_path(config)
     local_config = _load_local_config(local_path)
     job_kind = _infer_job_kind(local_config)
-    remote_path = _remote_config_path(config)
+    try:
+        remote_config = str(local_path.relative_to(Path.cwd()))
+    except ValueError:
+        remote_config = config
+    remote_path = _remote_config_path(remote_config)
 
     if job_kind == JobKind.TOKENIZE:
         result = _run_or_spawn(prepare_dataset_on_volume, remote_path, wait)
@@ -316,7 +331,7 @@ def main(*argv: str) -> None:
     parser = argparse.ArgumentParser(
         description="Run a qwen3-sae-features Modal job from a YAML config."
     )
-    parser.add_argument("config_arg", nargs="?", help="YAML config path, e.g. config/cache_1m.yaml")
+    parser.add_argument("config_arg", nargs="?", help="YAML config path, e.g. config/cache/1m.yaml")
     parser.add_argument("--config", dest="config_opt", help="YAML config path")
     parser.add_argument(
         "--wait",
