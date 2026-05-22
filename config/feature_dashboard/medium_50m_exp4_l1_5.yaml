@@ -6,14 +6,15 @@ sae_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5
 load_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/final_sae
 hook_name: model.layers.20
 
-output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/dashboard
+output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/medium_dashboard
 overwrite: true
 
-# Full dashboard pass: scan all cached activation rows and write top examples
-# for every SAE feature. Raise batch_rows if the GPU has lots of free memory.
-top_k: 20
-window_tokens: 48
-preview_features: 40
+# Medium run: big enough to show real feature diversity, small enough to debug.
+max_rows: 512
+num_features: 200
+top_k: 10
+window_tokens: 40
+preview_features: 50
 batch_rows: 8
 
 # Evidence-quality filters for autointerp readiness.

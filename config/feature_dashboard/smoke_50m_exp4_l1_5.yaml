@@ -18,6 +18,12 @@ window_tokens: 24
 preview_features: 12
 batch_rows: 2
 
+# Evidence-quality filters. Smoke is still too small for real interpretation,
+# but these catch row-start and zero-activation artifacts early.
+min_token_position: 8
+min_example_activation: 1e-6
+max_activation_examples_per_feature: 20
+
 device: cuda
 dtype: float32
 local_files_only: true

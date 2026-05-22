@@ -40,6 +40,10 @@ class DashboardConfig:
     max_rows: int | None
     num_features: int | None
     min_activation: float | None
+    min_token_position: int
+    max_token_position: int | None
+    min_example_activation: float
+    max_activation_examples_per_feature: int
     feature_ids: list[int] | None
     device: str
     dtype: str
@@ -85,6 +89,7 @@ def parse_dashboard_config(path: str | Path) -> DashboardConfig:
     max_rows = cfg.get("max_rows")
     num_features = cfg.get("num_features")
     min_activation = cfg.get("min_activation")
+    max_token_position = cfg.get("max_token_position")
     feature_ids = cfg.get("feature_ids")
 
     return DashboardConfig(
@@ -102,6 +107,12 @@ def parse_dashboard_config(path: str | Path) -> DashboardConfig:
         max_rows=int(max_rows) if max_rows is not None else None,
         num_features=int(num_features) if num_features is not None else None,
         min_activation=float(min_activation) if min_activation is not None else None,
+        min_token_position=int(cfg.get("min_token_position", 0)),
+        max_token_position=int(max_token_position) if max_token_position is not None else None,
+        min_example_activation=float(cfg.get("min_example_activation", 0.0)),
+        max_activation_examples_per_feature=int(
+            cfg.get("max_activation_examples_per_feature", cfg.get("top_k", 20))
+        ),
         feature_ids=[int(feature_id) for feature_id in feature_ids]
         if feature_ids is not None
         else None,
@@ -194,6 +205,7 @@ def stream_top_k_feature_activations(
 
             flat_acts = batch_acts.reshape(rows_in_batch * context_size, d_in).to(config.device)
             feature_acts = sae.encode(flat_acts)
+            apply_position_filters(feature_acts, rows_in_batch, context_size, config)
             if config.feature_ids is not None:
                 feature_acts = feature_acts.index_select(dim=1, index=feature_id_tensor)
 
@@ -223,6 +235,31 @@ def stream_top_k_feature_activations(
         tokens_seen=tokens_seen,
         context_size=context_size,
     )
+
+
+def apply_position_filters(
+    feature_acts: Any,
+    rows_in_batch: int,
+    context_size: int,
+    config: DashboardConfig,
+) -> None:
+    """Mask row-boundary tokens before top-k selection.
+
+    Row-start tokens have missing left context, and row-end tokens can have
+    missing right context. Masking here keeps those positions out of the top-k
+    heap instead of filtering them after they have already displaced better
+    evidence.
+    """
+
+    import torch
+
+    positions = torch.arange(context_size, device=feature_acts.device).repeat(rows_in_batch)
+    keep = positions >= config.min_token_position
+    if config.max_token_position is not None:
+        keep = keep & (positions <= config.max_token_position)
+    if bool(keep.all()):
+        return
+    feature_acts.masked_fill_(~keep[:, None], -torch.inf)
 
 
 def top_k_for_batch(feature_acts: Any, top_k: int, token_offset: int) -> tuple[Any, Any]:
@@ -356,9 +393,15 @@ def build_feature_examples(
 ) -> list[dict[str, Any]]:
     examples = []
     for rank in range(config.top_k):
+        if len(examples) >= config.max_activation_examples_per_feature:
+            break
         global_token_index = int(top_indices[rank])
         activation = float(top_values[rank])
-        if global_token_index < 0 or activation == float("-inf"):
+        if (
+            global_token_index < 0
+            or activation == float("-inf")
+            or activation < config.min_example_activation
+        ):
             continue
 
         row_idx = global_token_index // context_size
@@ -406,6 +449,10 @@ def write_dashboard_outputs(
         "written_features": len(feature_rows),
         "top_k": config.top_k,
         "window_tokens": config.window_tokens,
+        "min_token_position": config.min_token_position,
+        "max_token_position": config.max_token_position,
+        "min_example_activation": config.min_example_activation,
+        "max_activation_examples_per_feature": config.max_activation_examples_per_feature,
         "rows_seen": top_k_result.rows_seen,
         "tokens_seen": top_k_result.tokens_seen,
         "batch_rows": config.batch_rows,
