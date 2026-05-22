@@ -23,6 +23,7 @@ from typing import Any
 
 import modal
 
+from scripts.autointerp_labels import run_autointerp_labels
 from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.feature_dashboard import run_feature_dashboard
 from scripts.inspect_activations import inspect_cached_activations
@@ -51,6 +52,7 @@ image = (
         "sae-lens",
         "pyyaml",
         "wandb",
+        "httpx",
     )
     .env(
         {
@@ -72,6 +74,7 @@ class JobKind(StrEnum):
     TRAIN_SAE = "train_sae"
     INSPECT_SAE = "inspect_sae"
     FEATURE_DASHBOARD = "feature_dashboard"
+    AUTOINTERP_LABELS = "autointerp_labels"
 
 
 def _load_local_config(config_path: Path) -> dict[str, Any]:
@@ -158,6 +161,8 @@ def _infer_job_kind(config: dict[str, Any]) -> JobKind:
         return JobKind.CACHE_ACTIVATIONS
     if "sae_output_path" in config:
         return JobKind.TRAIN_SAE
+    if "input_path" in config and "output_path" in config and "model_id" in config:
+        return JobKind.AUTOINTERP_LABELS
     if "output_path" in config and "activation_path" in config and "sae_path" in config:
         return JobKind.FEATURE_DASHBOARD
     if "activation_path" in config:
@@ -295,6 +300,21 @@ def feature_dashboard_on_volume(config_path: str) -> dict[str, Any]:
     return result
 
 
+@app.function(
+    image=image,
+    cpu=16,
+    memory=32768,
+    timeout=60 * 60 * 4,
+    secrets=[modal.Secret.from_name("deepseek-secret")],
+    volumes={str(VOLUME_ROOT): volume},
+)
+def autointerp_labels_on_volume(config_path: str) -> dict[str, Any]:
+    volume.reload()
+    result = run_autointerp_labels(config_path, commit_callback=volume.commit)
+    volume.commit()
+    return result
+
+
 def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
     local_path = _resolve_local_config_path(config)
     local_config = _load_local_config(local_path)
@@ -317,6 +337,8 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         result = inspect_sae_on_volume.remote(remote_path)
     elif job_kind == JobKind.FEATURE_DASHBOARD:
         result = _run_or_spawn(feature_dashboard_on_volume, remote_path, wait)
+    elif job_kind == JobKind.AUTOINTERP_LABELS:
+        result = _run_or_spawn(autointerp_labels_on_volume, remote_path, wait)
     else:
         raise AssertionError(f"Unhandled job kind: {job_kind}")
 

@@ -1,0 +1,22 @@
+job: autointerp_labels
+
+input_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/dashboard/top_activations.jsonl
+output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp_smoke
+
+model_id: deepseek-v4-flash
+api_base_url: https://api.deepseek.com
+
+max_features: 100
+batch_features_per_call: 10
+examples_per_feature: 10
+max_context_chars_per_example: 700
+concurrency: 8
+
+temperature: 0.0
+max_tokens: 4000
+skip_existing: true
+overwrite: true
+request_timeout_seconds: 600
+max_retries: 5
+retry_base_seconds: 2.0
+commit_every_batches: 2
