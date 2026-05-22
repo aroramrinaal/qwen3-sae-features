@@ -15,7 +15,10 @@ num_features: 6000
 top_k: 10
 window_tokens: 40
 preview_features: 50
-batch_rows: 8
+batch_rows: 64
+progress_interval_batches: 5
+checkpoint_interval_batches: 20
+resume_from_checkpoint: true
 
 # Evidence-quality filters for autointerp readiness.
 min_token_position: 8

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 REQUIRED_FIELDS = [
@@ -48,6 +49,9 @@ class DashboardConfig:
     diverse_preview_middle: int
     diverse_preview_tail: int
     diverse_preview_seed: int
+    progress_interval_batches: int
+    checkpoint_interval_batches: int
+    resume_from_checkpoint: bool
     feature_ids: list[int] | None
     device: str
     dtype: str
@@ -62,6 +66,7 @@ class TopKResult:
     rows_seen: int
     tokens_seen: int
     context_size: int
+    batches_seen: int
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -121,6 +126,9 @@ def parse_dashboard_config(path: str | Path) -> DashboardConfig:
         diverse_preview_middle=int(cfg.get("diverse_preview_middle", 20)),
         diverse_preview_tail=int(cfg.get("diverse_preview_tail", 20)),
         diverse_preview_seed=int(cfg.get("diverse_preview_seed", 42)),
+        progress_interval_batches=int(cfg.get("progress_interval_batches", 50)),
+        checkpoint_interval_batches=int(cfg.get("checkpoint_interval_batches", 250)),
+        resume_from_checkpoint=bool(cfg.get("resume_from_checkpoint", True)),
         feature_ids=[int(feature_id) for feature_id in feature_ids]
         if feature_ids is not None
         else None,
@@ -131,12 +139,15 @@ def parse_dashboard_config(path: str | Path) -> DashboardConfig:
     )
 
 
-def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
-    if overwrite and output_dir.exists():
-        if not output_dir.is_relative_to(Path("/vol/features")):
-            raise ValueError(f"Refusing to overwrite outside /vol/features: {output_dir}")
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def prepare_output_dir(config: DashboardConfig) -> None:
+    checkpoint_exists = checkpoint_path(config).exists()
+    should_keep_for_resume = config.resume_from_checkpoint and checkpoint_exists
+    if config.overwrite and config.output_path.exists() and not should_keep_for_resume:
+        if not config.output_path.is_relative_to(Path("/vol/features")):
+            raise ValueError(f"Refusing to overwrite outside /vol/features: {config.output_path}")
+        shutil.rmtree(config.output_path)
+    config.output_path.mkdir(parents=True, exist_ok=True)
+    checkpoint_path(config).parent.mkdir(parents=True, exist_ok=True)
 
 
 def load_activation_dataset(config: DashboardConfig):
@@ -182,20 +193,45 @@ def stream_top_k_feature_activations(
     sae: Any,
     config: DashboardConfig,
     tracked_feature_ids: list[int],
+    commit_callback: Callable[[], None] | None = None,
 ) -> TopKResult:
     import torch
 
     tracked_count = len(tracked_feature_ids)
     feature_id_tensor = torch.tensor(tracked_feature_ids, device=config.device, dtype=torch.long)
-    top_values = torch.full((tracked_count, config.top_k), -torch.inf, dtype=torch.float32)
-    top_indices = torch.full((tracked_count, config.top_k), -1, dtype=torch.long)
+    checkpoint = load_topk_checkpoint(config, tracked_count)
+    if checkpoint is None:
+        top_values = torch.full((tracked_count, config.top_k), -torch.inf, dtype=torch.float32)
+        top_indices = torch.full((tracked_count, config.top_k), -1, dtype=torch.long)
+        rows_seen = 0
+        tokens_seen = 0
+        context_size = 0
+        batches_seen = 0
+    else:
+        top_values = checkpoint["top_values"]
+        top_indices = checkpoint["top_indices"]
+        rows_seen = int(checkpoint["rows_seen"])
+        tokens_seen = int(checkpoint["tokens_seen"])
+        context_size = int(checkpoint["context_size"])
+        batches_seen = int(checkpoint["batches_seen"])
 
-    rows_seen = 0
-    tokens_seen = 0
-    context_size = 0
+    total_rows = estimate_total_rows(dataset, config)
+    total_tokens_estimate = None
+    start_time = time.time()
+    last_log_time = start_time
+    initial_tokens_seen = tokens_seen
+    print(
+        "[dashboard] starting scan "
+        f"resume={checkpoint is not None} rows_seen={rows_seen} "
+        f"tokens_seen={tokens_seen} total_rows={total_rows} "
+        f"batch_rows={config.batch_rows} top_k={config.top_k}",
+        flush=True,
+    )
 
     with torch.inference_mode():
-        for batch in dataset.iter(batch_size=config.batch_rows):
+        for batch_idx, batch in enumerate(dataset.iter(batch_size=config.batch_rows)):
+            if batch_idx < batches_seen:
+                continue
             batch_acts = activation_batch_to_tensor(batch[config.hook_name])
             if batch_acts.ndim != 3:
                 raise ValueError(
@@ -204,6 +240,7 @@ def stream_top_k_feature_activations(
                 )
 
             rows_in_batch, context_size, d_in = batch_acts.shape
+            total_tokens_estimate = total_rows * context_size
             if config.max_rows is not None and rows_seen >= config.max_rows:
                 break
             if config.max_rows is not None and rows_seen + rows_in_batch > config.max_rows:
@@ -232,9 +269,45 @@ def stream_top_k_feature_activations(
 
             rows_seen += rows_in_batch
             tokens_seen += rows_in_batch * context_size
+            batches_seen = batch_idx + 1
+
+            if should_log_progress(batches_seen, config, last_log_time):
+                last_log_time = time.time()
+                log_dashboard_progress(
+                    rows_seen=rows_seen,
+                    tokens_seen=tokens_seen,
+                    total_rows=total_rows,
+                    total_tokens_estimate=total_tokens_estimate,
+                    start_time=start_time,
+                    initial_tokens_seen=initial_tokens_seen,
+                    batches_seen=batches_seen,
+                )
+
+            if should_checkpoint(batches_seen, config):
+                save_topk_checkpoint(
+                    config=config,
+                    top_values=top_values,
+                    top_indices=top_indices,
+                    rows_seen=rows_seen,
+                    tokens_seen=tokens_seen,
+                    context_size=context_size,
+                    batches_seen=batches_seen,
+                    commit_callback=commit_callback,
+                )
 
     if tokens_seen == 0:
         raise ValueError(f"No activation rows were read from {config.activation_path}")
+
+    save_topk_checkpoint(
+        config=config,
+        top_values=top_values,
+        top_indices=top_indices,
+        rows_seen=rows_seen,
+        tokens_seen=tokens_seen,
+        context_size=context_size,
+        batches_seen=batches_seen,
+        commit_callback=commit_callback,
+    )
 
     return TopKResult(
         values=top_values,
@@ -242,6 +315,130 @@ def stream_top_k_feature_activations(
         rows_seen=rows_seen,
         tokens_seen=tokens_seen,
         context_size=context_size,
+        batches_seen=batches_seen,
+    )
+
+
+def checkpoint_path(config: DashboardConfig) -> Path:
+    return config.output_path / "checkpoints" / "topk.pt"
+
+
+def load_topk_checkpoint(config: DashboardConfig, tracked_count: int) -> dict[str, Any] | None:
+    import torch
+
+    path = checkpoint_path(config)
+    if not config.resume_from_checkpoint or not path.exists():
+        return None
+
+    checkpoint = torch.load(path, map_location="cpu")
+    expected_shape = (tracked_count, config.top_k)
+    values = checkpoint.get("top_values")
+    indices = checkpoint.get("top_indices")
+    if values is None or indices is None:
+        raise ValueError(f"Checkpoint {path} is missing top_values/top_indices")
+    if tuple(values.shape) != expected_shape or tuple(indices.shape) != expected_shape:
+        raise ValueError(
+            f"Checkpoint {path} shape mismatch. Expected {expected_shape}, "
+            f"got values={tuple(values.shape)} indices={tuple(indices.shape)}"
+        )
+    checkpoint_batch_rows = checkpoint.get("batch_rows")
+    if checkpoint_batch_rows is not None and int(checkpoint_batch_rows) != config.batch_rows:
+        raise ValueError(
+            f"Checkpoint {path} was created with batch_rows={checkpoint_batch_rows}, "
+            f"but this run uses batch_rows={config.batch_rows}. Delete the checkpoint "
+            "or set resume_from_checkpoint: false for a fresh run."
+        )
+
+    print(
+        "[dashboard] resuming checkpoint "
+        f"path={path} rows_seen={checkpoint.get('rows_seen')} "
+        f"tokens_seen={checkpoint.get('tokens_seen')} "
+        f"batches_seen={checkpoint.get('batches_seen')}",
+        flush=True,
+    )
+    return checkpoint
+
+
+def save_topk_checkpoint(
+    config: DashboardConfig,
+    top_values: Any,
+    top_indices: Any,
+    rows_seen: int,
+    tokens_seen: int,
+    context_size: int,
+    batches_seen: int,
+    commit_callback: Callable[[], None] | None,
+) -> None:
+    import torch
+
+    path = checkpoint_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "top_values": top_values.cpu(),
+            "top_indices": top_indices.cpu(),
+            "rows_seen": rows_seen,
+            "tokens_seen": tokens_seen,
+            "context_size": context_size,
+            "batches_seen": batches_seen,
+            "batch_rows": config.batch_rows,
+            "top_k": config.top_k,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        },
+        path,
+    )
+    if commit_callback is not None:
+        commit_callback()
+    print(
+        "[dashboard] checkpoint saved "
+        f"rows={rows_seen} tokens={tokens_seen} batches={batches_seen} path={path}",
+        flush=True,
+    )
+
+
+def estimate_total_rows(dataset: Any, config: DashboardConfig) -> int:
+    total_rows = len(dataset)
+    if config.max_rows is not None:
+        return min(total_rows, config.max_rows)
+    return total_rows
+
+
+def should_log_progress(batches_seen: int, config: DashboardConfig, last_log_time: float) -> bool:
+    if config.progress_interval_batches > 0 and batches_seen % config.progress_interval_batches == 0:
+        return True
+    return time.time() - last_log_time >= 300
+
+
+def should_checkpoint(batches_seen: int, config: DashboardConfig) -> bool:
+    return (
+        config.checkpoint_interval_batches > 0
+        and batches_seen % config.checkpoint_interval_batches == 0
+    )
+
+
+def log_dashboard_progress(
+    rows_seen: int,
+    tokens_seen: int,
+    total_rows: int,
+    total_tokens_estimate: int | None,
+    start_time: float,
+    initial_tokens_seen: int,
+    batches_seen: int,
+) -> None:
+    elapsed = max(time.time() - start_time, 1.0)
+    tokens_per_second = max(tokens_seen - initial_tokens_seen, 0) / elapsed
+    eta_hours = None
+    if total_tokens_estimate is not None and tokens_per_second > 0:
+        remaining_tokens = max(total_tokens_estimate - tokens_seen, 0)
+        eta_hours = remaining_tokens / tokens_per_second / 3600
+    percent = rows_seen / max(total_rows, 1) * 100
+    eta_text = "unknown" if eta_hours is None else f"{eta_hours:.2f}"
+    print(
+        "[dashboard] progress "
+        f"batches={batches_seen} rows={rows_seen}/{total_rows} "
+        f"tokens={tokens_seen} pct={percent:.2f}% "
+        f"tok/s={tokens_per_second:.1f} eta_hr={eta_text}",
+        flush=True,
     )
 
 
@@ -473,7 +670,11 @@ def write_dashboard_outputs(
         "max_activation_examples_per_feature": config.max_activation_examples_per_feature,
         "rows_seen": top_k_result.rows_seen,
         "tokens_seen": top_k_result.tokens_seen,
+        "batches_seen": top_k_result.batches_seen,
         "batch_rows": config.batch_rows,
+        "progress_interval_batches": config.progress_interval_batches,
+        "checkpoint_interval_batches": config.checkpoint_interval_batches,
+        "checkpoint_path": str(checkpoint_path(config)),
         "device": config.device,
         "dtype": config.dtype,
         "jsonl_path": str(jsonl_path),
@@ -610,9 +811,12 @@ def sample_rank_indices(
     return sorted(rng.sample(population, count))
 
 
-def run_feature_dashboard(config_path: str | Path) -> dict[str, Any]:
+def run_feature_dashboard(
+    config_path: str | Path,
+    commit_callback: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     config = parse_dashboard_config(config_path)
-    prepare_output_dir(config.output_path, config.overwrite)
+    prepare_output_dir(config)
 
     dataset = load_activation_dataset(config)
     sae = load_sae(config)
@@ -625,6 +829,7 @@ def run_feature_dashboard(config_path: str | Path) -> dict[str, Any]:
         sae=sae,
         config=config,
         tracked_feature_ids=tracked_feature_ids,
+        commit_callback=commit_callback,
     )
 
     tokenizer = load_tokenizer(config)

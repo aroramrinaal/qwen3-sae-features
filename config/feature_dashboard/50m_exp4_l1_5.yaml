@@ -10,11 +10,17 @@ output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/dashboar
 overwrite: true
 
 # Full dashboard pass: scan all cached activation rows and write top examples
-# for every SAE feature. Raise batch_rows if the GPU has lots of free memory.
+# for every SAE feature.
 top_k: 20
 window_tokens: 48
 preview_features: 40
-batch_rows: 8
+batch_rows: 64
+
+# Long-run observability and recovery. Checkpoints are committed to the Modal
+# Volume, so a crashed run can resume instead of starting from token 0.
+progress_interval_batches: 25
+checkpoint_interval_batches: 100
+resume_from_checkpoint: true
 
 # Evidence-quality filters for autointerp readiness.
 min_token_position: 8

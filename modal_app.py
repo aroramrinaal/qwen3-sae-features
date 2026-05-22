@@ -290,7 +290,7 @@ def inspect_sae_on_volume(config_path: str) -> dict[str, Any]:
 )
 def feature_dashboard_on_volume(config_path: str) -> dict[str, Any]:
     volume.reload()
-    result = run_feature_dashboard(config_path)
+    result = run_feature_dashboard(config_path, commit_callback=volume.commit)
     volume.commit()
     return result
 
