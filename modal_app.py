@@ -138,12 +138,12 @@ def _infer_job_kind(config: dict[str, Any]) -> JobKind:
         return JobKind.TOKENIZE
     if "new_cached_activations_path" in config:
         return JobKind.CACHE_ACTIVATIONS
-    if "activation_path" in config:
-        return JobKind.INSPECT_ACTIVATIONS
     if "sae_output_path" in config:
         return JobKind.TRAIN_SAE
     if "output_path" in config and "activation_path" in config and "sae_path" in config:
         return JobKind.FEATURE_DASHBOARD
+    if "activation_path" in config:
+        return JobKind.INSPECT_ACTIVATIONS
     if "sae_path" in config or "load_path" in config:
         return JobKind.INSPECT_SAE
 

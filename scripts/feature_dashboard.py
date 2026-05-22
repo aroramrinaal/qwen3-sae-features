@@ -1,14 +1,15 @@
 """Collect top activating token contexts for a trained SAE.
 
-This is the dashboarding step before autointerp. It streams cached residual
-activations through the SAE encoder, keeps only top-k token positions per
-feature, then decodes small tokenizer windows around those positions.
+This is the dashboarding step before autointerp. It uses SAELens to load the
+trained SAE and run sae.encode() on cached residual-stream activations. It does
+not run the base Qwen model again.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,38 @@ REQUIRED_FIELDS = [
     "hook_name",
     "output_path",
 ]
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    model_name: str
+    activation_path: Path
+    sae_path: Path
+    load_path: Path
+    hook_name: str
+    output_path: Path
+    overwrite: bool
+    top_k: int
+    batch_rows: int
+    window_tokens: int
+    preview_features: int
+    max_rows: int | None
+    num_features: int | None
+    min_activation: float | None
+    feature_ids: list[int] | None
+    device: str
+    dtype: str
+    local_files_only: bool
+    trust_remote_code: bool
+
+
+@dataclass
+class TopKResult:
+    values: Any
+    indices: Any
+    rows_seen: int
+    tokens_seen: int
+    context_size: int
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -37,22 +70,220 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return cfg
 
 
-def _parse_feature_ids(cfg: dict[str, Any], d_sae: int) -> list[int] | None:
-    raw_feature_ids = cfg.get("feature_ids")
-    if raw_feature_ids is None:
+def parse_dashboard_config(path: str | Path) -> DashboardConfig:
+    import torch
+
+    cfg = load_config(path)
+    sae_path = Path(cfg["sae_path"])
+    output_path = Path(cfg["output_path"])
+
+    if not output_path.is_absolute():
+        raise ValueError("output_path must be an absolute /vol path.")
+    if not output_path.is_relative_to(Path("/vol/features")):
+        raise ValueError("Refusing to write feature dashboards outside /vol/features.")
+
+    max_rows = cfg.get("max_rows")
+    num_features = cfg.get("num_features")
+    min_activation = cfg.get("min_activation")
+    feature_ids = cfg.get("feature_ids")
+
+    return DashboardConfig(
+        model_name=str(cfg["model_name"]),
+        activation_path=Path(cfg["activation_path"]),
+        sae_path=sae_path,
+        load_path=Path(cfg.get("load_path", sae_path / "final_sae")),
+        hook_name=str(cfg["hook_name"]),
+        output_path=output_path,
+        overwrite=bool(cfg.get("overwrite", False)),
+        top_k=int(cfg.get("top_k", 20)),
+        batch_rows=int(cfg.get("batch_rows", 2)),
+        window_tokens=int(cfg.get("window_tokens", 32)),
+        preview_features=int(cfg.get("preview_features", 20)),
+        max_rows=int(max_rows) if max_rows is not None else None,
+        num_features=int(num_features) if num_features is not None else None,
+        min_activation=float(min_activation) if min_activation is not None else None,
+        feature_ids=[int(feature_id) for feature_id in feature_ids]
+        if feature_ids is not None
+        else None,
+        device=str(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
+        dtype=str(cfg.get("dtype", "float32")),
+        local_files_only=bool(cfg.get("local_files_only", True)),
+        trust_remote_code=bool(cfg.get("trust_remote_code", True)),
+    )
+
+
+def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
+    if overwrite and output_dir.exists():
+        if not output_dir.is_relative_to(Path("/vol/features")):
+            raise ValueError(f"Refusing to overwrite outside /vol/features: {output_dir}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def load_activation_dataset(config: DashboardConfig):
+    from datasets import load_from_disk
+
+    dataset = load_from_disk(str(config.activation_path))
+    if config.hook_name not in dataset.column_names:
+        raise ValueError(
+            f"Hook column {config.hook_name!r} not found. Columns: {dataset.column_names}"
+        )
+    if "token_ids" not in dataset.column_names:
+        raise ValueError("Feature dashboarding needs token_ids in the cached activation dataset.")
+    return dataset
+
+
+def load_sae(config: DashboardConfig):
+    from sae_lens import SAE
+
+    return SAE.load_from_disk(config.load_path, device=config.device, dtype=config.dtype)
+
+
+def load_tokenizer(config: DashboardConfig):
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        config.model_name,
+        local_files_only=config.local_files_only,
+        trust_remote_code=config.trust_remote_code,
+    )
+
+
+def validate_feature_ids(feature_ids: list[int] | None, d_sae: int) -> list[int] | None:
+    if feature_ids is None:
         return None
-    feature_ids = [int(feature_id) for feature_id in raw_feature_ids]
     bad_ids = [feature_id for feature_id in feature_ids if feature_id < 0 or feature_id >= d_sae]
     if bad_ids:
         raise ValueError(f"feature_ids out of range for d_sae={d_sae}: {bad_ids[:10]}")
     return feature_ids
 
 
-def _token_text(tokenizer: Any, token_ids: list[int]) -> str:
+def stream_top_k_feature_activations(
+    dataset: Any,
+    sae: Any,
+    config: DashboardConfig,
+    tracked_feature_ids: list[int],
+) -> TopKResult:
+    import torch
+
+    tracked_count = len(tracked_feature_ids)
+    feature_id_tensor = torch.tensor(tracked_feature_ids, device=config.device, dtype=torch.long)
+    top_values = torch.full((tracked_count, config.top_k), -torch.inf, dtype=torch.float32)
+    top_indices = torch.full((tracked_count, config.top_k), -1, dtype=torch.long)
+
+    rows_seen = 0
+    tokens_seen = 0
+    context_size = 0
+
+    with torch.inference_mode():
+        for batch in dataset.iter(batch_size=config.batch_rows):
+            batch_acts = torch.tensor(batch[config.hook_name], dtype=torch.float32)
+            if batch_acts.ndim != 3:
+                raise ValueError(
+                    "Expected cached activations shaped [batch, context, d_in], "
+                    f"got {list(batch_acts.shape)}"
+                )
+
+            rows_in_batch, context_size, d_in = batch_acts.shape
+            if config.max_rows is not None and rows_seen >= config.max_rows:
+                break
+            if config.max_rows is not None and rows_seen + rows_in_batch > config.max_rows:
+                keep_rows = config.max_rows - rows_seen
+                batch_acts = batch_acts[:keep_rows]
+                rows_in_batch = keep_rows
+
+            flat_acts = batch_acts.reshape(rows_in_batch * context_size, d_in).to(config.device)
+            feature_acts = sae.encode(flat_acts)
+            if config.feature_ids is not None:
+                feature_acts = feature_acts.index_select(dim=1, index=feature_id_tensor)
+
+            batch_values, batch_indices = top_k_for_batch(
+                feature_acts=feature_acts,
+                top_k=config.top_k,
+                token_offset=tokens_seen,
+            )
+            top_values, top_indices = merge_top_k(
+                old_values=top_values,
+                old_indices=top_indices,
+                batch_values=batch_values,
+                batch_indices=batch_indices,
+                top_k=config.top_k,
+            )
+
+            rows_seen += rows_in_batch
+            tokens_seen += rows_in_batch * context_size
+
+    if tokens_seen == 0:
+        raise ValueError(f"No activation rows were read from {config.activation_path}")
+
+    return TopKResult(
+        values=top_values,
+        indices=top_indices,
+        rows_seen=rows_seen,
+        tokens_seen=tokens_seen,
+        context_size=context_size,
+    )
+
+
+def top_k_for_batch(feature_acts: Any, top_k: int, token_offset: int) -> tuple[Any, Any]:
+    import torch
+
+    batch_k = min(top_k, feature_acts.shape[0])
+    values, positions = torch.topk(feature_acts.float(), k=batch_k, dim=0)
+    values = values.transpose(0, 1).cpu()
+    indices = (positions.transpose(0, 1).cpu() + token_offset).long()
+    return values, indices
+
+
+def merge_top_k(
+    old_values: Any,
+    old_indices: Any,
+    batch_values: Any,
+    batch_indices: Any,
+    top_k: int,
+) -> tuple[Any, Any]:
+    import torch
+
+    combined_values = torch.cat([old_values, batch_values], dim=1)
+    combined_indices = torch.cat([old_indices, batch_indices], dim=1)
+    new_values, new_positions = torch.topk(combined_values, k=top_k, dim=1)
+    return new_values, combined_indices.gather(1, new_positions)
+
+
+def select_output_features(
+    config: DashboardConfig,
+    tracked_feature_ids: list[int],
+    top_values: Any,
+) -> list[int]:
+    max_values = top_values[:, 0].detach().cpu()
+    local_index_by_feature_id = {
+        feature_id: local_idx for local_idx, feature_id in enumerate(tracked_feature_ids)
+    }
+
+    candidates = tracked_feature_ids
+    if config.min_activation is not None:
+        candidates = [
+            feature_id
+            for local_idx, feature_id in enumerate(tracked_feature_ids)
+            if float(max_values[local_idx]) >= config.min_activation
+        ]
+
+    if config.num_features is None:
+        return candidates
+
+    ranked_positions = sorted(
+        range(len(candidates)),
+        key=lambda idx: float(max_values[local_index_by_feature_id[candidates[idx]]]),
+        reverse=True,
+    )
+    return [candidates[idx] for idx in ranked_positions[: config.num_features]]
+
+
+def token_text(tokenizer: Any, token_ids: list[int]) -> str:
     return tokenizer.decode(token_ids, skip_special_tokens=False)
 
 
-def _decode_window(
+def decode_window(
     tokenizer: Any,
     token_ids: list[int],
     token_position: int,
@@ -64,9 +295,9 @@ def _decode_window(
     center_ids = token_ids[token_position : token_position + 1]
     right_ids = token_ids[token_position + 1 : end]
 
-    left = _token_text(tokenizer, left_ids)
-    center = _token_text(tokenizer, center_ids)
-    right = _token_text(tokenizer, right_ids)
+    left = token_text(tokenizer, left_ids)
+    center = token_text(tokenizer, center_ids)
+    right = token_text(tokenizer, right_ids)
 
     return {
         "window_start": start,
@@ -77,13 +308,134 @@ def _decode_window(
     }
 
 
-def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def build_feature_rows(
+    dataset: Any,
+    tokenizer: Any,
+    config: DashboardConfig,
+    tracked_feature_ids: list[int],
+    output_feature_ids: list[int],
+    top_k_result: TopKResult,
+) -> list[dict[str, Any]]:
+    local_index_by_feature_id = {
+        feature_id: local_idx for local_idx, feature_id in enumerate(tracked_feature_ids)
+    }
+
+    feature_rows: list[dict[str, Any]] = []
+    for feature_id in output_feature_ids:
+        local_idx = local_index_by_feature_id[feature_id]
+        examples = build_feature_examples(
+            dataset=dataset,
+            tokenizer=tokenizer,
+            config=config,
+            top_indices=top_k_result.indices[local_idx],
+            top_values=top_k_result.values[local_idx],
+            context_size=top_k_result.context_size,
+        )
+        feature_rows.append(
+            {
+                "feature_id": int(feature_id),
+                "max_activation": examples[0]["activation"] if examples else None,
+                "top_examples": examples,
+            }
+        )
+
+    feature_rows.sort(
+        key=lambda row: row["max_activation"] if row["max_activation"] is not None else -float("inf"),
+        reverse=True,
+    )
+    return feature_rows
+
+
+def build_feature_examples(
+    dataset: Any,
+    tokenizer: Any,
+    config: DashboardConfig,
+    top_indices: Any,
+    top_values: Any,
+    context_size: int,
+) -> list[dict[str, Any]]:
+    examples = []
+    for rank in range(config.top_k):
+        global_token_index = int(top_indices[rank])
+        activation = float(top_values[rank])
+        if global_token_index < 0 or activation == float("-inf"):
+            continue
+
+        row_idx = global_token_index // context_size
+        token_position = global_token_index % context_size
+        token_ids = [int(token_id) for token_id in dataset[int(row_idx)]["token_ids"]]
+        window = decode_window(tokenizer, token_ids, int(token_position), config.window_tokens)
+        examples.append(
+            {
+                "rank": rank + 1,
+                "activation": activation,
+                "global_token_index": global_token_index,
+                "row_index": int(row_idx),
+                "token_position": int(token_position),
+                **window,
+            }
+        )
+    return examples
+
+
+def write_dashboard_outputs(
+    config_path: str | Path,
+    config: DashboardConfig,
+    sae: Any,
+    top_k_result: TopKResult,
+    tracked_feature_count: int,
+    feature_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    jsonl_path = config.output_path / "top_activations.jsonl"
+    summary_path = config.output_path / "feature_summary.json"
+    preview_path = config.output_path / "preview.md"
+
+    write_jsonl(jsonl_path, feature_rows)
+    write_preview(preview_path, feature_rows, config.preview_features)
+
+    summary = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config_path": str(config_path),
+        "model_name": config.model_name,
+        "activation_path": str(config.activation_path),
+        "sae_path": str(config.sae_path),
+        "load_path": str(config.load_path),
+        "hook_name": config.hook_name,
+        "d_sae": int(sae.cfg.d_sae),
+        "tracked_features": tracked_feature_count,
+        "written_features": len(feature_rows),
+        "top_k": config.top_k,
+        "window_tokens": config.window_tokens,
+        "rows_seen": top_k_result.rows_seen,
+        "tokens_seen": top_k_result.tokens_seen,
+        "batch_rows": config.batch_rows,
+        "device": config.device,
+        "dtype": config.dtype,
+        "jsonl_path": str(jsonl_path),
+        "preview_path": str(preview_path),
+    }
+    with open(summary_path, "w") as file:
+        json.dump(summary, file, indent=2, sort_keys=True)
+
+    return {
+        "output_path": str(config.output_path),
+        "top_activations_path": str(jsonl_path),
+        "summary_path": str(summary_path),
+        "preview_path": str(preview_path),
+        "rows_seen": top_k_result.rows_seen,
+        "tokens_seen": top_k_result.tokens_seen,
+        "written_features": len(feature_rows),
+        "top_feature_ids": [row["feature_id"] for row in feature_rows[:10]],
+    }
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with open(path, "w") as file:
         for row in rows:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _write_preview(path: Path, rows: list[dict[str, Any]], preview_features: int) -> None:
+def write_preview(path: Path, rows: list[dict[str, Any]], preview_features: int) -> None:
     lines = [
         "# SAE Feature Dashboard Preview",
         "",
@@ -103,229 +455,42 @@ def _write_preview(path: Path, rows: list[dict[str, Any]], preview_features: int
     path.write_text("\n".join(lines))
 
 
-def _load_sae(load_path: Path, device: str, dtype: str):
-    from sae_lens import SAE
-
-    return SAE.load_from_disk(load_path, device=device, dtype=dtype)
-
-
-def _select_output_features(
-    cfg: dict[str, Any],
-    tracked_feature_ids: list[int],
-    top_values: Any,
-) -> list[int]:
-    requested_count = cfg.get("num_features")
-    min_activation = cfg.get("min_activation")
-    max_values = top_values[:, 0].detach().cpu()
-    local_index_by_feature_id = {
-        feature_id: local_idx for local_idx, feature_id in enumerate(tracked_feature_ids)
-    }
-
-    candidates = tracked_feature_ids
-    if min_activation is not None:
-        threshold = float(min_activation)
-        candidates = [
-            feature_id
-            for local_idx, feature_id in enumerate(tracked_feature_ids)
-            if float(max_values[local_idx]) >= threshold
-        ]
-
-    if requested_count is None:
-        return candidates
-
-    count = int(requested_count)
-    ranked_local = sorted(
-        range(len(candidates)),
-        key=lambda idx: float(max_values[local_index_by_feature_id[candidates[idx]]]),
-        reverse=True,
-    )
-    return [candidates[idx] for idx in ranked_local[:count]]
-
-
-def _safe_remove_output_dir(output_dir: Path) -> None:
-    if output_dir.exists():
-        if not output_dir.is_relative_to(Path("/vol/features")):
-            raise ValueError(f"Refusing to overwrite outside /vol/features: {output_dir}")
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-
 def run_feature_dashboard(config_path: str | Path) -> dict[str, Any]:
-    import torch
-    from datasets import load_from_disk
-    from transformers import AutoTokenizer
+    config = parse_dashboard_config(config_path)
+    prepare_output_dir(config.output_path, config.overwrite)
 
-    cfg = load_config(config_path)
-
-    activation_path = Path(cfg["activation_path"])
-    sae_root = Path(cfg["sae_path"])
-    load_path = Path(cfg.get("load_path", sae_root / "final_sae"))
-    output_dir = Path(cfg["output_path"])
-    if not output_dir.is_absolute():
-        raise ValueError("output_path must be an absolute /vol path.")
-    if not output_dir.is_relative_to(Path("/vol/features")):
-        raise ValueError("Refusing to write feature dashboards outside /vol/features.")
-
-    overwrite = bool(cfg.get("overwrite", False))
-    if overwrite:
-        _safe_remove_output_dir(output_dir)
-    else:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-    hook_name = str(cfg["hook_name"])
-    top_k = int(cfg.get("top_k", 20))
-    batch_rows = int(cfg.get("batch_rows", 2))
-    window_tokens = int(cfg.get("window_tokens", 32))
-    max_rows = cfg.get("max_rows")
-    max_rows = int(max_rows) if max_rows is not None else None
-    device = str(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
-    dtype = str(cfg.get("dtype", "float32"))
-
-    dataset = load_from_disk(str(activation_path))
-    if hook_name not in dataset.column_names:
-        raise ValueError(f"Hook column {hook_name!r} not found. Columns: {dataset.column_names}")
-    if "token_ids" not in dataset.column_names:
-        raise ValueError("Feature dashboarding needs token_ids in the cached activation dataset.")
-
-    sae = _load_sae(load_path, device=device, dtype=dtype)
+    dataset = load_activation_dataset(config)
+    sae = load_sae(config)
     d_sae = int(sae.cfg.d_sae)
-    configured_feature_ids = _parse_feature_ids(cfg, d_sae)
+    configured_feature_ids = validate_feature_ids(config.feature_ids, d_sae)
     tracked_feature_ids = configured_feature_ids or list(range(d_sae))
-    tracked_count = len(tracked_feature_ids)
-    feature_id_tensor = torch.tensor(tracked_feature_ids, device=device, dtype=torch.long)
 
-    top_values = torch.full((tracked_count, top_k), -torch.inf, dtype=torch.float32)
-    top_indices = torch.full((tracked_count, top_k), -1, dtype=torch.long)
-
-    rows_seen = 0
-    tokens_seen = 0
-
-    with torch.inference_mode():
-        iterator = dataset.iter(batch_size=batch_rows)
-        for batch in iterator:
-            batch_acts = torch.tensor(batch[hook_name], dtype=torch.float32)
-            if batch_acts.ndim != 3:
-                raise ValueError(
-                    f"Expected cached activations shaped [batch, context, d_in], got {list(batch_acts.shape)}"
-                )
-            rows_in_batch, context_size, d_in = batch_acts.shape
-            if max_rows is not None and rows_seen >= max_rows:
-                break
-            if max_rows is not None and rows_seen + rows_in_batch > max_rows:
-                keep_rows = max_rows - rows_seen
-                batch_acts = batch_acts[:keep_rows]
-                rows_in_batch = keep_rows
-
-            flat_acts = batch_acts.reshape(rows_in_batch * context_size, d_in).to(device)
-            feature_acts = sae.encode(flat_acts)
-            if configured_feature_ids is not None:
-                feature_acts = feature_acts.index_select(dim=1, index=feature_id_tensor)
-
-            batch_k = min(top_k, feature_acts.shape[0])
-            batch_values, batch_positions = torch.topk(feature_acts.float(), k=batch_k, dim=0)
-            batch_values = batch_values.transpose(0, 1).cpu()
-            batch_indices = (batch_positions.transpose(0, 1).cpu() + tokens_seen).long()
-
-            combined_values = torch.cat([top_values, batch_values], dim=1)
-            combined_indices = torch.cat([top_indices, batch_indices], dim=1)
-            new_values, new_positions = torch.topk(combined_values, k=top_k, dim=1)
-            top_values = new_values
-            top_indices = combined_indices.gather(1, new_positions)
-
-            rows_seen += rows_in_batch
-            tokens_seen += rows_in_batch * context_size
-
-    if tokens_seen == 0:
-        raise ValueError(f"No activation rows were read from {activation_path}")
-
-    output_feature_ids = _select_output_features(cfg, tracked_feature_ids, top_values)
-    local_index_by_feature_id = {
-        feature_id: local_idx for local_idx, feature_id in enumerate(tracked_feature_ids)
-    }
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(cfg["model_name"]),
-        local_files_only=bool(cfg.get("local_files_only", True)),
-        trust_remote_code=bool(cfg.get("trust_remote_code", True)),
+    top_k_result = stream_top_k_feature_activations(
+        dataset=dataset,
+        sae=sae,
+        config=config,
+        tracked_feature_ids=tracked_feature_ids,
     )
 
-    feature_rows: list[dict[str, Any]] = []
-    for feature_id in output_feature_ids:
-        local_idx = local_index_by_feature_id[feature_id]
-        examples = []
-        for rank in range(top_k):
-            global_token_index = int(top_indices[local_idx, rank])
-            activation = float(top_values[local_idx, rank])
-            if global_token_index < 0 or activation == float("-inf"):
-                continue
-            row_idx = global_token_index // context_size
-            token_position = global_token_index % context_size
-            token_ids = [int(token_id) for token_id in dataset[int(row_idx)]["token_ids"]]
-            window = _decode_window(tokenizer, token_ids, int(token_position), window_tokens)
-            examples.append(
-                {
-                    "rank": rank + 1,
-                    "activation": activation,
-                    "global_token_index": global_token_index,
-                    "row_index": int(row_idx),
-                    "token_position": int(token_position),
-                    **window,
-                }
-            )
-
-        feature_rows.append(
-            {
-                "feature_id": int(feature_id),
-                "max_activation": examples[0]["activation"] if examples else None,
-                "top_examples": examples,
-            }
-        )
-
-    feature_rows.sort(
-        key=lambda row: row["max_activation"] if row["max_activation"] is not None else -float("inf"),
-        reverse=True,
+    tokenizer = load_tokenizer(config)
+    output_feature_ids = select_output_features(config, tracked_feature_ids, top_k_result.values)
+    feature_rows = build_feature_rows(
+        dataset=dataset,
+        tokenizer=tokenizer,
+        config=config,
+        tracked_feature_ids=tracked_feature_ids,
+        output_feature_ids=output_feature_ids,
+        top_k_result=top_k_result,
     )
 
-    jsonl_path = output_dir / "top_activations.jsonl"
-    summary_path = output_dir / "feature_summary.json"
-    preview_path = output_dir / "preview.md"
-    _write_jsonl(jsonl_path, feature_rows)
-    _write_preview(preview_path, feature_rows, int(cfg.get("preview_features", 20)))
-
-    summary = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "config_path": str(config_path),
-        "model_name": str(cfg["model_name"]),
-        "activation_path": str(activation_path),
-        "sae_path": str(sae_root),
-        "load_path": str(load_path),
-        "hook_name": hook_name,
-        "d_sae": d_sae,
-        "tracked_features": tracked_count,
-        "written_features": len(feature_rows),
-        "top_k": top_k,
-        "window_tokens": window_tokens,
-        "rows_seen": rows_seen,
-        "tokens_seen": tokens_seen,
-        "batch_rows": batch_rows,
-        "device": device,
-        "dtype": dtype,
-        "jsonl_path": str(jsonl_path),
-        "preview_path": str(preview_path),
-    }
-    with open(summary_path, "w") as file:
-        json.dump(summary, file, indent=2, sort_keys=True)
-
-    return {
-        "output_path": str(output_dir),
-        "top_activations_path": str(jsonl_path),
-        "summary_path": str(summary_path),
-        "preview_path": str(preview_path),
-        "rows_seen": rows_seen,
-        "tokens_seen": tokens_seen,
-        "written_features": len(feature_rows),
-        "top_feature_ids": [row["feature_id"] for row in feature_rows[:10]],
-    }
+    return write_dashboard_outputs(
+        config_path=config_path,
+        config=config,
+        sae=sae,
+        top_k_result=top_k_result,
+        tracked_feature_count=len(tracked_feature_ids),
+        feature_rows=feature_rows,
+    )
 
 
 def main() -> None:
