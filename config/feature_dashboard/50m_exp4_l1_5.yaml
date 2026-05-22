@@ -21,6 +21,13 @@ min_token_position: 8
 min_example_activation: 1e-6
 max_activation_examples_per_feature: 20
 
+# Preview-quality gate: preview.md shows loudest features, while
+# diverse_preview.md samples farther down the max-activation ranking.
+diverse_preview_top: 20
+diverse_preview_middle: 20
+diverse_preview_tail: 20
+diverse_preview_seed: 42
+
 device: cuda
 dtype: float32
 local_files_only: true

@@ -44,6 +44,10 @@ class DashboardConfig:
     max_token_position: int | None
     min_example_activation: float
     max_activation_examples_per_feature: int
+    diverse_preview_top: int
+    diverse_preview_middle: int
+    diverse_preview_tail: int
+    diverse_preview_seed: int
     feature_ids: list[int] | None
     device: str
     dtype: str
@@ -113,6 +117,10 @@ def parse_dashboard_config(path: str | Path) -> DashboardConfig:
         max_activation_examples_per_feature=int(
             cfg.get("max_activation_examples_per_feature", cfg.get("top_k", 20))
         ),
+        diverse_preview_top=int(cfg.get("diverse_preview_top", 20)),
+        diverse_preview_middle=int(cfg.get("diverse_preview_middle", 20)),
+        diverse_preview_tail=int(cfg.get("diverse_preview_tail", 20)),
+        diverse_preview_seed=int(cfg.get("diverse_preview_seed", 42)),
         feature_ids=[int(feature_id) for feature_id in feature_ids]
         if feature_ids is not None
         else None,
@@ -432,9 +440,11 @@ def write_dashboard_outputs(
     jsonl_path = config.output_path / "top_activations.jsonl"
     summary_path = config.output_path / "feature_summary.json"
     preview_path = config.output_path / "preview.md"
+    diverse_preview_path = config.output_path / "diverse_preview.md"
 
     write_jsonl(jsonl_path, feature_rows)
     write_preview(preview_path, feature_rows, config.preview_features)
+    write_diverse_preview(diverse_preview_path, feature_rows, config)
 
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -460,6 +470,7 @@ def write_dashboard_outputs(
         "dtype": config.dtype,
         "jsonl_path": str(jsonl_path),
         "preview_path": str(preview_path),
+        "diverse_preview_path": str(diverse_preview_path),
     }
     with open(summary_path, "w") as file:
         json.dump(summary, file, indent=2, sort_keys=True)
@@ -469,6 +480,7 @@ def write_dashboard_outputs(
         "top_activations_path": str(jsonl_path),
         "summary_path": str(summary_path),
         "preview_path": str(preview_path),
+        "diverse_preview_path": str(diverse_preview_path),
         "rows_seen": top_k_result.rows_seen,
         "tokens_seen": top_k_result.tokens_seen,
         "written_features": len(feature_rows),
@@ -483,13 +495,14 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def write_preview(path: Path, rows: list[dict[str, Any]], preview_features: int) -> None:
+    preview_rows = [row for row in rows if row["max_activation"] is not None]
     lines = [
         "# SAE Feature Dashboard Preview",
         "",
         "Bracketed text marks the max-activating token for that example.",
         "",
     ]
-    for row in rows[:preview_features]:
+    for row in preview_rows[:preview_features]:
         lines.append(f"## Feature {row['feature_id']}")
         lines.append("")
         lines.append(f"max_activation: `{row['max_activation']:.6g}`")
@@ -500,6 +513,93 @@ def write_preview(path: Path, rows: list[dict[str, Any]], preview_features: int)
             lines.append(f"{idx}. `{activation:.6g}` {text}")
         lines.append("")
     path.write_text("\n".join(lines))
+
+
+def write_diverse_preview(
+    path: Path,
+    rows: list[dict[str, Any]],
+    config: DashboardConfig,
+) -> None:
+    import random
+
+    rows_with_examples = [row for row in rows if row["max_activation"] is not None]
+    selected: list[tuple[str, int, dict[str, Any]]] = []
+    seen_feature_ids: set[int] = set()
+
+    def add_row(section: str, rank: int, row: dict[str, Any]) -> None:
+        feature_id = int(row["feature_id"])
+        if feature_id in seen_feature_ids:
+            return
+        seen_feature_ids.add(feature_id)
+        selected.append((section, rank, row))
+
+    for rank, row in enumerate(rows_with_examples[: config.diverse_preview_top], start=1):
+        add_row("Top max-activation features", rank, row)
+
+    rng = random.Random(config.diverse_preview_seed)
+    middle_start = min(200, len(rows_with_examples))
+    middle_end = min(2000, len(rows_with_examples))
+    tail_start = min(2000, len(rows_with_examples))
+    tail_end = min(6000, len(rows_with_examples))
+
+    middle_indices = sample_rank_indices(
+        rng=rng,
+        start=middle_start,
+        end=middle_end,
+        count=config.diverse_preview_middle,
+    )
+    tail_indices = sample_rank_indices(
+        rng=rng,
+        start=tail_start,
+        end=tail_end,
+        count=config.diverse_preview_tail,
+    )
+
+    for idx in middle_indices:
+        add_row("Random features from ranks 200-2000", idx + 1, rows_with_examples[idx])
+    for idx in tail_indices:
+        add_row("Random features from ranks 2000-6000", idx + 1, rows_with_examples[idx])
+
+    lines = [
+        "# Diverse SAE Feature Dashboard Preview",
+        "",
+        "This preview samples beyond the loudest max-activation features.",
+        "Bracketed text marks the max-activating token for that example.",
+        "",
+    ]
+
+    current_section = None
+    for section, rank, row in selected:
+        if section != current_section:
+            lines.append(f"## {section}")
+            lines.append("")
+            current_section = section
+        lines.append(f"### Rank {rank} - Feature {row['feature_id']}")
+        lines.append("")
+        lines.append(f"max_activation: `{row['max_activation']:.6g}`")
+        lines.append("")
+        for idx, example in enumerate(row["top_examples"], start=1):
+            activation = example["activation"]
+            token_position = example["token_position"]
+            text = example["text"].replace("\n", "\\n")
+            lines.append(f"{idx}. `{activation:.6g}` pos `{token_position}` {text}")
+        lines.append("")
+
+    path.write_text("\n".join(lines))
+
+
+def sample_rank_indices(
+    rng: Any,
+    start: int,
+    end: int,
+    count: int,
+) -> list[int]:
+    if count <= 0 or start >= end:
+        return []
+    population = list(range(start, end))
+    if len(population) <= count:
+        return population
+    return sorted(rng.sample(population, count))
 
 
 def run_feature_dashboard(config_path: str | Path) -> dict[str, Any]:
