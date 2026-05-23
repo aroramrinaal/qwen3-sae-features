@@ -1,176 +1,226 @@
 # qwen3-sae-features
 
-Qwen3 SAE feature-learning experiments on Modal using SAELens.
+Sparse autoencoder feature experiments for `Qwen/Qwen3-4B-Base` layer 20 on Modal.
 
-## Phase 0: Model setup and inference
+Run jobs through the config-driven remote entrypoint in [modal_app.py](modal_app.py):
 
-Completed.
-
-- Downloaded `Qwen/Qwen3-4B-Base` into the Modal Volume `qwen3-sae-features`.
-- Stored model files under `/vol/models/Qwen3-4B-Base`.
-- Verified Hugging Face Transformers inference with `model.generate()`.
-- Verified the model loads from local Modal Volume files instead of redownloading from Hugging Face.
-
-## Phase 1: Residual-stream hook smoke test
-
-Completed.
-
-- Hooked `model.layers.20`.
-- Captured layer-20 activations from Qwen3-4B-Base.
-- Verified activation shape `[batch, seq, d_model]`.
-- Confirmed layer-20 residual stream width is `2560`.
-
-Smoke result:
-
-```text
-layer: 20
-shape: torch.Size([1, 5, 2560])
-dtype: torch.bfloat16
-device: cuda:0
-token_count: 5
+```bash
+.venv/bin/modal run --detach modal_app.py --config <config.yaml>
 ```
 
-## Phase 2: Dataset tokenization
+Use `--wait` only for short inspection or analysis jobs.
 
-Completed for smoke.
+## Phase 0: Model Setup
 
-- Used FineWeb-Edu text as the source distribution.
-- Tokenized text using the Qwen3 tokenizer.
-- Saved the tokenized dataset to the Modal Volume as a Hugging Face Arrow dataset.
+Completed. Qwen3-4B-Base is cached on the Modal volume and reused by later jobs instead of being downloaded every run.
 
-Smoke tokenized dataset path:
+Volume path:
+
+```text
+/vol/models/Qwen3-4B-Base
+```
+
+## Phase 1: Layer-20 Activation Hook
+
+Completed. The project hooks `model.layers.20`, whose residual-stream width is `2560`.
+
+This is the activation space the SAE learns over.
+
+## Phase 2: Tokenized Dataset
+
+Completed for `smoke`, `1m`, and `50m`. FineWeb-Edu text is tokenized with the Qwen3 tokenizer.
+
+Volume paths:
 
 ```text
 /vol/datasets/fineweb-edu/tokens/smoke
+/vol/datasets/fineweb-edu/tokens/1m
+/vol/datasets/fineweb-edu/tokens/50m
 ```
 
-## Phase 3: Cached activation collection
+## Phase 3: Cached Activations
 
-Completed for smoke.
+Completed for `smoke`, `1m`, and `50m`. Layer-20 residual activations are stored as Arrow datasets so SAE training/dashboarding can run without repeatedly running the base model.
 
-- Used SAELens `CacheActivationsRunner`.
-- Loaded Qwen3-4B-Base from the Modal Volume.
-- Ran a forward pass over the smoke token dataset.
-- Cached activations from `model.layers.20`.
-- Saved cached activations as a Hugging Face Arrow dataset.
-
-Smoke activation cache path:
+Volume paths:
 
 ```text
 /vol/activations/qwen3-4b-base/layer20/smoke
+/vol/activations/qwen3-4b-base/layer20/1m
+/vol/activations/qwen3-4b-base/layer20/50m
 ```
 
-Inspection result:
+## Phase 4: SAE Training
+
+Completed for the main run: `50m_standard_exp4_l1_5`.
+
+The main SAE has `d_in=2560`, expansion factor `4`, and `d_sae=10240`.
+
+Volume path:
 
 ```text
-columns: ['model.layers.20', 'token_ids']
-row_count: 16
-context_size: 512
-d_in: 2560
-total_activation_tokens: 8192
-dtype: float32
-no_nan: true
-no_inf: true
-all_checks_passed: true
+/vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5
 ```
 
-## Phase 4: Smoke SAE training
+## Phase 5: Feature Dashboard
 
-Completed for the 50M `exp4_l1_5` run.
+Completed. The dashboard step reads cached activations, runs the SAE encoder, and stores top activating token windows per feature.
 
-The next step is to train a tiny standard SAE using the cached smoke activation dataset. This is not intended to produce scientifically meaningful features. It is only meant to prove that the cached activations can be loaded by SAELens and used for SAE training.
-
-Smoke SAE config:
+Main dashboard path:
 
 ```text
-config/train/sae/smoke.yaml
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/dashboard
 ```
 
-Expected smoke SAE output:
+## Phase 6: Autointerp Labels
+
+Completed. DeepSeek labeled `9418` SAE features with `0` failed batches.
+
+Main autointerp path:
 
 ```text
-/vol/saes/qwen3-4b-base/layer20/smoke_standard_exp2
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp
 ```
 
-The trainer saves:
+## Phase 7: Label Analysis
+
+Completed. Labels were grouped into confidence and rough semantic buckets for later feature selection.
+
+Useful outputs:
 
 ```text
-final_sae/
-inference_sae/
-metadata.json
+label_analysis/summary.md
+feature_groups/high_confidence.jsonl
+feature_groups/low_confidence_or_unclear.jsonl
+feature_groups/boring_formatting.jsonl
+feature_groups/topic_semantic.jsonl
+feature_groups/style_instruction.jsonl
+feature_groups/candidate_steering_features.jsonl
 ```
 
-## Phase 5: Feature dashboarding before autointerp
+## Volume Map
 
-Current phase.
-
-Do not start with LLM labels first. The LLM can only label the evidence you give
-it, so the first interpretability milestone is: can we produce clean top
-activating examples for SAE features?
-
-Mental model:
+Modal volume: `qwen3-sae-features`
 
 ```text
-cached layer-20 residual vector, shape [2560]
-        -> SAE encoder
-sparse feature activations, shape [10240]
-        -> stream top-k only
-decoded token windows with the max token bracketed
+qwen3-sae-features/
+  models/
+    Qwen3-4B-Base/
+      config.json
+      generation_config.json
+      tokenizer_config.json
+      tokenizer.json
+      vocab.json
+      merges.txt
+      model.safetensors.index.json
+      model-00001-of-00003.safetensors
+      model-00002-of-00003.safetensors
+      model-00003-of-00003.safetensors
+
+  datasets/
+    fineweb-edu/
+      tokens/
+        smoke/
+          data-*.arrow
+          dataset_info.json
+          state.json
+        1m/
+          data-*.arrow
+          dataset_info.json
+          state.json
+        50m/
+          data-*.arrow
+          dataset_info.json
+          state.json
+
+  activations/
+    qwen3-4b-base/
+      layer20/
+        smoke/
+          data-*.arrow
+          dataset_info.json
+          state.json
+        1m/
+          data-*.arrow
+          dataset_info.json
+          state.json
+        50m/
+          data-*.arrow
+          dataset_info.json
+          state.json
+
+  saes/
+    qwen3-4b-base/
+      layer20/
+        smoke_standard_exp2/
+          final_sae/
+          inference_sae/
+          checkpoints/
+          output/
+          metadata.json
+        1m_standard_exp2/
+          final_sae/
+          inference_sae/
+          checkpoints/
+          output/
+          metadata.json
+        50m_standard_exp4_l1_1/
+          final_sae/
+          inference_sae/
+          checkpoints/
+          output/
+          metadata.json
+        50m_standard_exp4_l1_2/
+          final_sae/
+          inference_sae/
+          checkpoints/
+          output/
+          metadata.json
+        50m_standard_exp4_l1_5/
+          final_sae/
+          inference_sae/
+          checkpoints/
+          output/
+          metadata.json
+
+  features/
+    qwen3-4b-base/
+      layer20/
+        50m_standard_exp4_l1_5/
+          smoke_dashboard/
+            top_activations.jsonl
+            feature_summary.json
+            preview.md
+          medium_dashboard/
+            top_activations.jsonl
+            feature_summary.json
+            preview.md
+          dashboard/
+            top_activations.jsonl
+            feature_summary.json
+            preview.md
+          autointerp_smoke/
+            batches/
+            labels.jsonl
+            label_summary.md
+            run_summary.json
+            failed_batches.jsonl
+          autointerp/
+            batches/
+            labels.jsonl
+            label_summary.md
+            run_summary.json
+            failed_batches.jsonl
+            label_analysis/
+              summary.md
+              summary.json
+              confidence_histogram.csv
+              label_frequency.csv
+            feature_groups/
+              high_confidence.jsonl
+              low_confidence_or_unclear.jsonl
+              boring_formatting.jsonl
+              topic_semantic.jsonl
+              style_instruction.jsonl
+              candidate_steering_features.jsonl
 ```
-
-The base Qwen model does not need to run again for this step. We use:
-
-```text
-tokenizer:    /vol/models/Qwen3-4B-Base
-activations:  /vol/activations/qwen3-4b-base/layer20/50m
-SAE:          /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/final_sae
-```
-
-Feature dashboard outputs:
-
-```text
-/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/top_activations.jsonl
-/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/feature_summary.json
-/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/smoke_dashboard/preview.md
-```
-
-Each `top_activations.jsonl` row is one feature:
-
-```json
-{
-  "feature_id": 3172,
-  "max_activation": 18.2,
-  "top_examples": [
-    {
-      "rank": 1,
-      "activation": 18.2,
-      "row_index": 123,
-      "token_position": 45,
-      "text": "... import torch.nn as [[nn]] ..."
-    }
-  ]
-}
-```
-
-Smoke dashboard run:
-
-```bash
-.venv/bin/modal run --detach modal_app.py --config config/feature_dashboard/smoke_50m_exp4_l1_5.yaml
-```
-
-Full dashboard run:
-
-```bash
-MODAL_GPU=H100 .venv/bin/modal run --detach modal_app.py --config config/feature_dashboard/50m_exp4_l1_5.yaml
-```
-
-What the smoke config proves:
-
-- the trained SAE loads from `final_sae`
-- cached `.arrow` activations load with the expected hook column
-- activations can be encoded into SAE feature activations
-- top activating token positions can be found without saving all `50M x 10240` activations
-- token windows can be decoded from the local Qwen tokenizer
-
-Only after this looks clean should an `autointerp.py` step read
-`top_activations.jsonl` and ask an LLM for labels.
