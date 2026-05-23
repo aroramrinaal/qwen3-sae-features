@@ -1,0 +1,11 @@
+job: autointerp_analysis
+
+input_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp/labels.jsonl
+output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp/label_analysis
+group_output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp/feature_groups
+
+high_confidence_threshold: 0.85
+low_confidence_threshold: 0.6
+candidate_confidence_threshold: 0.85
+max_examples_in_markdown: 40
+overwrite: true

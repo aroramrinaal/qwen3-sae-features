@@ -23,6 +23,7 @@ from typing import Any
 
 import modal
 
+from scripts.autointerp_analysis import run_autointerp_analysis
 from scripts.autointerp_labels import run_autointerp_labels
 from scripts.collect_activations import get_cache_output_path, run_collect
 from scripts.feature_dashboard import run_feature_dashboard
@@ -75,6 +76,7 @@ class JobKind(StrEnum):
     INSPECT_SAE = "inspect_sae"
     FEATURE_DASHBOARD = "feature_dashboard"
     AUTOINTERP_LABELS = "autointerp_labels"
+    AUTOINTERP_ANALYSIS = "autointerp_analysis"
 
 
 def _load_local_config(config_path: Path) -> dict[str, Any]:
@@ -163,6 +165,8 @@ def _infer_job_kind(config: dict[str, Any]) -> JobKind:
         return JobKind.TRAIN_SAE
     if "input_path" in config and "output_path" in config and "model_id" in config:
         return JobKind.AUTOINTERP_LABELS
+    if "input_path" in config and "output_path" in config:
+        return JobKind.AUTOINTERP_ANALYSIS
     if "output_path" in config and "activation_path" in config and "sae_path" in config:
         return JobKind.FEATURE_DASHBOARD
     if "activation_path" in config:
@@ -319,6 +323,20 @@ def autointerp_labels_on_volume(config_path: str) -> dict[str, Any]:
     return result
 
 
+@app.function(
+    image=image,
+    cpu=4,
+    memory=8192,
+    timeout=60 * 20,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def autointerp_analysis_on_volume(config_path: str) -> dict[str, Any]:
+    volume.reload()
+    result = run_autointerp_analysis(config_path, commit_callback=volume.commit)
+    volume.commit()
+    return result
+
+
 def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
     local_path = _resolve_local_config_path(config)
     local_config = _load_local_config(local_path)
@@ -343,6 +361,8 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         result = _run_or_spawn(feature_dashboard_on_volume, remote_path, wait)
     elif job_kind == JobKind.AUTOINTERP_LABELS:
         result = _run_or_spawn(autointerp_labels_on_volume, remote_path, wait)
+    elif job_kind == JobKind.AUTOINTERP_ANALYSIS:
+        result = autointerp_analysis_on_volume.remote(remote_path)
     else:
         raise AssertionError(f"Unhandled job kind: {job_kind}")
 
