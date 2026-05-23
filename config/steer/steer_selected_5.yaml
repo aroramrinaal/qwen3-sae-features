@@ -21,6 +21,7 @@ do_sample: false
 temperature: 0.7
 top_p: 0.9
 steer_on_prompt: true
+position_mode: last_token
 normalize_direction: false
 overwrite: true
 dtype: bfloat16

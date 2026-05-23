@@ -110,6 +110,9 @@ feature 3311: cooking instructions
 
 selected 5: cooking, exercise, biological adaptation, self-help feel, biblical moral language
 /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/selected_5
+
+3311 sweep: alpha grid across last-token/all-positions and raw/normalized decoder directions
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_3311_sweep_*
 ```
 
 ## Volume Map
@@ -246,4 +249,28 @@ qwen3-sae-features/
               generations.jsonl
               summary.md
               summary.json
+            feature_3311_sweep_last_raw/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_3311_sweep_last_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_3311_sweep_all_raw/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_3311_sweep_all_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
 ```
