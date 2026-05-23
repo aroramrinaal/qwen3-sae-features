@@ -98,6 +98,20 @@ feature_groups/style_instruction.jsonl
 feature_groups/candidate_steering_features.jsonl
 ```
 
+## Phase 8: Steering Smoke Test
+
+Started. The first causal steering tests add SAE decoder directions to the layer-20 hidden state during generation and compare base vs steered outputs.
+
+Initial steering runs:
+
+```text
+feature 3311: cooking instructions
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_3311
+
+selected 5: cooking, exercise, biological adaptation, self-help feel, biblical moral language
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/selected_5
+```
+
 ## Volume Map
 
 Modal volume: `qwen3-sae-features`
@@ -223,4 +237,13 @@ qwen3-sae-features/
               topic_semantic.jsonl
               style_instruction.jsonl
               candidate_steering_features.jsonl
+          steering/
+            feature_3311/
+              generations.jsonl
+              summary.md
+              summary.json
+            selected_5/
+              generations.jsonl
+              summary.md
+              summary.json
 ```

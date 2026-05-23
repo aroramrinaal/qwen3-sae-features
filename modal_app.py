@@ -30,6 +30,7 @@ from scripts.feature_dashboard import run_feature_dashboard
 from scripts.inspect_activations import inspect_cached_activations
 from scripts.inspect_sae import inspect_sae as inspect_sae_artifact
 from scripts.prepare_dataset import run_prepare
+from scripts.steer import run_steering
 from scripts.train_sae import run_train
 from scripts.weights import VOLUME_NAME, VOLUME_ROOT
 
@@ -77,6 +78,7 @@ class JobKind(StrEnum):
     FEATURE_DASHBOARD = "feature_dashboard"
     AUTOINTERP_LABELS = "autointerp_labels"
     AUTOINTERP_ANALYSIS = "autointerp_analysis"
+    STEER = "steer"
 
 
 def _load_local_config(config_path: Path) -> dict[str, Any]:
@@ -163,6 +165,8 @@ def _infer_job_kind(config: dict[str, Any]) -> JobKind:
         return JobKind.CACHE_ACTIVATIONS
     if "sae_output_path" in config:
         return JobKind.TRAIN_SAE
+    if "feature_ids" in config and "prompts" in config and "sae_path" in config:
+        return JobKind.STEER
     if "input_path" in config and "output_path" in config and "model_id" in config:
         return JobKind.AUTOINTERP_LABELS
     if "input_path" in config and "output_path" in config:
@@ -337,6 +341,21 @@ def autointerp_analysis_on_volume(config_path: str) -> dict[str, Any]:
     return result
 
 
+@app.function(
+    image=image,
+    gpu=GPU_REQUEST,
+    cpu=8,
+    memory=65536,
+    timeout=60 * 60,
+    volumes={str(VOLUME_ROOT): volume},
+)
+def steering_on_volume(config_path: str) -> dict[str, Any]:
+    volume.reload()
+    result = run_steering(config_path, commit_callback=volume.commit)
+    volume.commit()
+    return result
+
+
 def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
     local_path = _resolve_local_config_path(config)
     local_config = _load_local_config(local_path)
@@ -363,6 +382,8 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         result = _run_or_spawn(autointerp_labels_on_volume, remote_path, wait)
     elif job_kind == JobKind.AUTOINTERP_ANALYSIS:
         result = autointerp_analysis_on_volume.remote(remote_path)
+    elif job_kind == JobKind.STEER:
+        result = _run_or_spawn(steering_on_volume, remote_path, wait)
     else:
         raise AssertionError(f"Unhandled job kind: {job_kind}")
 
@@ -373,7 +394,7 @@ def _dispatch_config(config: str, wait: bool) -> dict[str, Any]:
         "remote_config_path": remote_path,
         "gpu": GPU_REQUEST
         if job_kind
-        in {JobKind.CACHE_ACTIVATIONS, JobKind.TRAIN_SAE, JobKind.FEATURE_DASHBOARD}
+        in {JobKind.CACHE_ACTIVATIONS, JobKind.TRAIN_SAE, JobKind.FEATURE_DASHBOARD, JobKind.STEER}
         else None,
         "result": result,
     }
