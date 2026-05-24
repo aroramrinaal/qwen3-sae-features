@@ -119,6 +119,9 @@ selected 5: cooking, exercise, biological adaptation, self-help feel, biblical m
 
 703 sweep: exercise and physical activity, normalized decoder direction, last-token/all-positions
 /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_703_sweep_*_norm
+
+1179/4126/6227 sweeps: University of Pennsylvania, Parkinson's disease, legal disclaimer/applicable law
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_{1179,4126,6227}_sweep_last_norm
 ```
 
 ## Volume Map
@@ -298,6 +301,24 @@ qwen3-sae-features/
               comparison_table.md
               comparison_table.csv
             feature_703_sweep_all_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_1179_sweep_last_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_4126_sweep_last_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_6227_sweep_last_norm/
               generations.jsonl
               summary.md
               summary.json

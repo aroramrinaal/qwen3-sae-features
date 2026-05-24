@@ -20,6 +20,3 @@ venv/
 .DS_Store
 .vscode/
 .idea/
-
-# Downloaded Modal volume artifacts
-features/
