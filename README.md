@@ -113,6 +113,12 @@ selected 5: cooking, exercise, biological adaptation, self-help feel, biblical m
 
 3311 sweep: alpha grid across last-token/all-positions and raw/normalized decoder directions
 /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_3311_sweep_*
+
+7771 sweep: biblical moral language, normalized decoder direction, last-token/all-positions
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_7771_sweep_*_norm
+
+703 sweep: exercise and physical activity, normalized decoder direction, last-token/all-positions
+/vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_703_sweep_*_norm
 ```
 
 ## Volume Map
@@ -268,6 +274,30 @@ qwen3-sae-features/
               comparison_table.md
               comparison_table.csv
             feature_3311_sweep_all_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_7771_sweep_last_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_7771_sweep_all_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_703_sweep_last_norm/
+              generations.jsonl
+              summary.md
+              summary.json
+              comparison_table.md
+              comparison_table.csv
+            feature_703_sweep_all_norm/
               generations.jsonl
               summary.md
               summary.json

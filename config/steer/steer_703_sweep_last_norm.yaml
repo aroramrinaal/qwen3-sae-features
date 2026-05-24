@@ -1,0 +1,28 @@
+job: steer
+
+model_path: /vol/models/Qwen3-4B-Base
+sae_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5
+sae_load_path: /vol/saes/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/final_sae
+candidate_labels_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/autointerp/feature_groups/candidate_steering_features.jsonl
+output_path: /vol/features/qwen3-4b-base/layer20/50m_standard_exp4_l1_5/steering/feature_703_sweep_last_norm
+
+hook_layer: 20
+feature_ids: [703]
+alphas: [-60, -40, -20, 0, 20, 40, 60, 80]
+seeds: [0]
+
+prompts:
+  - "I spent the weekend thinking about"
+  - "The best way to prepare for tomorrow is"
+  - "Write a short paragraph about a simple daily routine."
+  - "Write a paragraph about your morning."
+
+max_new_tokens: 96
+do_sample: false
+temperature: 0.7
+top_p: 0.9
+steer_on_prompt: true
+position_mode: last_token
+normalize_direction: true
+overwrite: true
+dtype: bfloat16
